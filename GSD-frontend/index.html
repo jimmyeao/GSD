@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GSD</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <!-- Marked — markdown renderer -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@14/marked.min.js"></script>
+
+  <!-- Highlight.js — code syntax highlighting -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css" />
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
+
+  <!-- Mermaid — diagram rendering -->
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+
+  <!-- Socket.IO client — update the src to match your backend version -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+  <link rel="stylesheet" href="src/css/styles.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Auth modal ───────────────────────────────────────────── -->
+  <div id="auth-modal" class="auth-modal">
+    <div class="auth-card">
+      <img class="auth-logo-img" src="src/img/logo.png" alt="Access" />
+      <h2 class="auth-title">GSD</h2>
+      <p class="auth-subtitle">Sign in to get stuff done</p>
+      <form id="auth-form" autocomplete="on">
+        <input id="auth-username" type="text" placeholder="Username" autocomplete="username" required />
+        <input id="auth-password" type="password" placeholder="Password" autocomplete="current-password" required />
+        <button type="submit" id="auth-submit">Log in</button>
+        <p id="auth-error" class="auth-error" hidden></p>
+      </form>
+      <p class="auth-toggle">
+        <span id="auth-toggle-text">No account?</span>
+        <a id="auth-switch" href="#">Register</a>
+      </p>
+    </div>
+  </div>
+
+  <!-- ── Header ─────────────────────────────────────────────── -->
+  <header id="header">
+    <button id="sidebar-toggle" title="Toggle sidebar">☰</button>
+
+    <div class="logo">
+      <img class="logo-img" src="src/img/logo.png" alt="Access" />
+      GSD
+    </div>
+
+    <div id="active-agent-wrap">
+      <span>›</span>
+      <span id="active-agent-label">Auto-Route</span>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="status-dot status-connecting" id="status-dot"></div>
+    <span id="status-text">Connecting…</span>
+
+    <button id="clear-btn" title="New chat">New Chat</button>
+    <button id="assets-btn" title="Generated assets">Assets</button>
+    <span id="user-label"></span>
+    <button id="logout-btn" hidden>Logout</button>
+    <button id="settings-btn" title="Backend settings">⚙ Settings</button>
+  </header>
+
+  <!-- ── Sidebar ────────────────────────────────────────────── -->
+  <aside id="sidebar">
+    <div class="sidebar-section-label">Agents</div>
+    <ul id="agent-list"></ul>
+    <div class="sidebar-section-label sidebar-convos-label">Conversations</div>
+    <ul id="conversation-list"></ul>
+  </aside>
+
+  <!-- ── Main ──────────────────────────────────────────────── -->
+  <main id="main">
+
+    <!-- Assets panel (hidden by default) -->
+    <div id="assets-panel" hidden>
+      <div class="assets-header">
+        <h3>Generated Assets</h3>
+        <button id="assets-close" class="assets-close-btn">Close</button>
+      </div>
+      <div id="assets-grid"></div>
+      <p id="assets-empty" class="assets-empty" hidden>No assets yet. Generate images, videos, or slides to see them here.</p>
+    </div>
+
+    <!-- Settings panel (hidden by default) -->
+    <div id="settings-panel" hidden>
+      <h3>Backend Connection</h3>
+      <label for="backend-url">Socket.IO server URL</label>
+      <input id="backend-url" type="url" placeholder="auto-detected from hostname" spellcheck="false" />
+      <p class="settings-note">
+        Point this to your GSD backend Socket.IO server. Auto-detected from
+        the current hostname on port 5000. Changes take effect when you click Connect.
+      </p>
+      <button id="connect-btn">Connect</button>
+    </div>
+
+    <!-- Chat messages -->
+    <div id="chat-messages">
+      <div id="empty-state">
+        <img class="empty-logo" src="src/img/logo.png" alt="Access" />
+        <h2>Get Stuff Done</h2>
+        <p>Pick an agent from the sidebar or leave it on Auto-Route and type your prompt below. All models run locally.</p>
+      </div>
+    </div>
+
+    <!-- Input area -->
+    <div id="input-area">
+      <div id="example-banner" hidden>
+        <span class="example-label">Try</span>
+        <span id="example-text"></span>
+      </div>
+
+      <div id="attached-files" hidden></div>
+      <div id="input-row">
+        <button id="attach-btn" title="Attach a file">📎</button>
+        <input id="file-input" type="file" multiple hidden
+               accept=".txt,.md,.js,.ts,.py,.json,.csv,.html,.css,.sh,.ps1,.psm1,.yaml,.yml,.xml,.sql,.go,.rs,.java,.c,.cpp,.h,.rb,.php,.swift,.kt,.r,.lua,.toml,.ini,.env,.log,.png,.jpg,.jpeg,.gif,.webp,.bmp" />
+        <textarea
+          id="prompt-input"
+          rows="1"
+          placeholder="Type a prompt… (Shift+Enter for new line)"
+        ></textarea>
+        <button id="optimise-btn" title="Enhance prompt with AI before sending">Optimise</button>
+        <button id="send-btn">Send</button>
+      </div>
+      <div id="optimise-status" hidden>
+        <span class="thinking-dot"></span><span class="thinking-dot"></span><span class="thinking-dot"></span>
+        <span class="thinking-label">Optimising prompt…</span>
+      </div>
+      <div class="input-hint">Enter to send · Shift+Enter for new line</div>
+    </div>
+
+  </main>
+</div>
+
+<!-- App scripts (ES modules) -->
+<script type="module">
+  // Configure marked with highlight.js (guard against CDN failure)
+  if (typeof marked !== 'undefined' && typeof hljs !== 'undefined') {
+    marked.use({
+      renderer: (() => {
+        const renderer = new marked.Renderer();
+        renderer.code = ({ text, lang }) => {
+          if (lang && hljs.getLanguage(lang)) {
+            try {
+              return `<pre><code class="hljs language-${lang}">${hljs.highlight(text, { language: lang }).value}</code></pre>`;
+            } catch (_) {}
+          }
+          return `<pre><code class="hljs">${hljs.highlightAuto(text).value}</code></pre>`;
+        };
+        return renderer;
+      })(),
+      gfm: true,
+      breaks: true,
+    });
+  }
+
+  // Configure mermaid
+  if (typeof mermaid !== 'undefined') {
+    mermaid.initialize({
+      startOnLoad: false,
+      theme: 'dark',
+      themeVariables: {
+        background: '#0d0f14',
+        primaryColor: '#4B112C',
+        primaryTextColor: '#e8eaf0',
+        lineColor: '#54B9B3',
+        secondaryColor: '#1a1e28',
+        tertiaryColor: '#2a2f42',
+        edgeLabelBackground: '#1a1e28',
+      },
+    });
+  }
+</script>
+
+<script type="module" src="src/js/main.js"></script>
+</body>
+</html>
