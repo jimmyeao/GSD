@@ -74,6 +74,7 @@ export class Chat {
       finalHtml = this._escapeHtml(this._streamBuffer).replace(/\n/g, '<br>');
     }
     this._streamEl.innerHTML = finalHtml;
+    this._addOpenInEditorButtons(this._streamEl);
     this.history.push({ role: 'assistant', content: this._streamBuffer });
     this._streamBuffer = '';
     this._streamEl = null;
@@ -86,6 +87,7 @@ export class Chat {
     this._hideEmptyState();
     this.history.push({ role, content });
     const el = this._createBubble(role, content, agentId);
+    if (role === 'assistant') this._addOpenInEditorButtons(el.querySelector('.bubble-content'));
     this.container.appendChild(el);
     this._renderMermaid();
     this._scrollToBottom();
@@ -121,7 +123,29 @@ export class Chat {
     if (this._emptyState) this._emptyState.hidden = false;
   }
 
+  /** Register callback for "Open in Editor" clicks: ({code, lang}) => void */
+  onOpenInEditor(callback) { this._openInEditorCb = callback; }
+
   // ------------------------------------------------------------------ private
+
+  _addOpenInEditorButtons(container) {
+    if (!container) return;
+    container.querySelectorAll('pre').forEach(pre => {
+      if (pre.querySelector('.open-in-editor-btn')) return;
+      const code = pre.querySelector('code');
+      if (!code) return;
+      const btn = document.createElement('button');
+      btn.className = 'open-in-editor-btn';
+      btn.textContent = 'Open in Editor';
+      btn.addEventListener('click', () => {
+        const lang = (code.className.match(/language-(\w+)/) || [])[1] || '';
+        const text = code.textContent;
+        if (this._openInEditorCb) this._openInEditorCb({ code: text, lang });
+      });
+      pre.style.position = 'relative';
+      pre.appendChild(btn);
+    });
+  }
 
   _hideEmptyState() {
     if (this._emptyState) this._emptyState.hidden = true;

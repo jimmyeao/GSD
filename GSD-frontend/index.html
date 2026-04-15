@@ -19,8 +19,11 @@
   <!-- Mermaid — diagram rendering -->
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 
-  <!-- Socket.IO client — update the src to match your backend version -->
+  <!-- Socket.IO client — must load before Monaco's AMD loader to avoid conflicts -->
   <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+  <!-- Monaco Editor loader (defines AMD require/define globals) -->
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
 
   <link rel="stylesheet" href="src/css/styles.css" />
 </head>
@@ -58,6 +61,11 @@
     <div id="active-agent-wrap">
       <span>›</span>
       <span id="active-agent-label">Auto-Route</span>
+    </div>
+
+    <div id="view-toggle" class="view-toggle">
+      <button id="chat-mode-btn" class="view-btn active" title="Chat view">Chat</button>
+      <button id="code-mode-btn" class="view-btn" title="Code view">Code</button>
     </div>
 
     <div class="spacer"></div>
@@ -104,6 +112,9 @@
       </p>
       <button id="connect-btn">Connect</button>
     </div>
+
+    <!-- Code view (hidden by default) -->
+    <div id="code-view-container" hidden></div>
 
     <!-- Chat messages -->
     <div id="chat-messages">

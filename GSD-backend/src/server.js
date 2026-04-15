@@ -17,7 +17,10 @@ import { socketAuth } from './auth.js';
 import authRoutes from './routes/auth.js';
 import convRoutes from './routes/conversations.js';
 import assetsRoutes from './routes/assets.js';
-import { mkdirSync, writeFileSync, unlinkSync, readFileSync } from 'node:fs';
+import workspaceRoutes from './routes/workspace.js';
+import sandboxRoutes from './routes/sandbox.js';
+import previewRoutes from './routes/preview.js';
+import { mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
 
 const app = express();
 const httpServer = createServer(app);
@@ -42,6 +45,9 @@ app.get('/health', (_req, res) => {
 app.use('/auth', authRoutes);
 app.use('/conversations', convRoutes);
 app.use('/assets', assetsRoutes);
+app.use('/workspace', workspaceRoutes);
+app.use('/sandbox', sandboxRoutes);
+app.use('/preview', previewRoutes);
 
 // ── ComfyUI image proxy ──────────────────────────────────────────────
 // Fetches the image from the local ComfyUI instance and re-serves it so
@@ -241,6 +247,247 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', (reason) => {
     console.log(`[ws] disconnected: ${socket.id} (${reason})`);
+  });
+
+  // ── Code-mode: CoderAgent with auto-save ──────────────────────────
+  socket.on('code:message', async ({ content, projectId, conversationId, history = [] }) => {
+    if (!content?.trim() || !projectId) return;
+    try {
+      const project = stmts.getProject.get(projectId, socket.user.id);
+      if (!project) { socket.emit('code:error', { message: 'Project not found' }); return; }
+
+      const wsRoot = join(__dirname, '..', 'data', 'workspaces', String(socket.user.id), String(projectId));
+      mkdirSync(wsRoot, { recursive: true });
+
+      // Build file tree
+      function buildFileList(dir, prefix = '') {
+        let result = '';
+        try {
+          const entries = readdirSync(dir, { withFileTypes: true });
+          for (const e of entries) {
+            if (e.name === 'node_modules' || e.name === '.git') continue;
+            if (e.isDirectory()) {
+              result += `${prefix}${e.name}/\n` + buildFileList(join(dir, e.name), prefix + '  ');
+            } else {
+              result += `${prefix}${e.name}\n`;
+            }
+          }
+        } catch { /* empty or unreadable dir */ }
+        return result;
+      }
+      const fileTreeString = buildFileList(wsRoot) || '(empty project)';
+
+      const systemPrompt = `You are CoderAgent, an expert software engineer integrated with an IDE.
+You write production-quality code and directly create/modify files in the user's project.
+
+CURRENT PROJECT FILES:
+${fileTreeString}
+
+IMPORTANT: When writing or modifying code, ALWAYS use filename-tagged code blocks:
+\`\`\`language:path/to/file.ext
+code here
+\`\`\`
+
+For example:
+\`\`\`javascript:src/index.js
+console.log('hello');
+\`\`\`
+
+Every filename-tagged code block will be automatically saved to the project.
+Use regular (untagged) code blocks for examples or snippets that shouldn't be saved.
+When modifying existing files, include the COMPLETE file content, not just changes.`;
+
+      // Resolve or create conversation
+      let convId = conversationId;
+      if (convId) { if (!stmts.getConversation.get(convId, socket.user.id)) convId = null; }
+      if (!convId) {
+        const title = content.slice(0, 80).replace(/\n/g, ' ').trim() || 'Code Session';
+        const result = stmts.insertConversation.run(socket.user.id, title, 'CoderAgent');
+        convId = result.lastInsertRowid;
+        socket.emit('conversation:created', { id: convId, title, agent_id: 'CoderAgent' });
+      }
+      stmts.insertMessage.run(convId, 'user', null, content);
+
+      // Demo mode
+      if (config.demoMode) { await streamDemo(socket, 'CoderAgent', content, undefined, convId); return; }
+
+      const modelCfg = config.models.coder;
+      const messages = buildMessages(systemPrompt, history, content);
+      let fullResponse = '';
+
+      const stream = streamCompletion(modelCfg.endpoint, modelCfg.model, messages, {
+        signal: AbortSignal.timeout(modelCfg.timeout),
+        onThinking: () => socket.emit('thinking', {}),
+      });
+
+      for await (const token of stream) {
+        fullResponse += token;
+        socket.emit('code:token', { token });
+      }
+
+      // Parse and save tagged code blocks
+      const codeBlockRe = /```(\w+):([^\n]+)\n([\s\S]*?)```/g;
+      let match;
+      while ((match = codeBlockRe.exec(fullResponse)) !== null) {
+        const [, language, filePath, code] = match;
+        const safePath = filePath.replace(/\.\./g, '').replace(/^\//, '');
+        const absPath = join(wsRoot, safePath);
+        mkdirSync(dirname(absPath), { recursive: true });
+        writeFileSync(absPath, code);
+        socket.emit('code:file-written', { path: safePath, language });
+        console.log(`[CoderAgent] wrote ${safePath}`);
+      }
+
+      stmts.insertMessage.run(convId, 'assistant', 'CoderAgent', fullResponse);
+      stmts.touchConversation.run(convId);
+      socket.emit('code:done', {});
+    } catch (err) {
+      console.error('[CoderAgent code:message] error:', err.message);
+      socket.emit('code:error', { message: err.message });
+    }
+  });
+
+  // ── Docker image build ────────────────────────────────────────────
+  socket.on('build:start', async ({ projectId }) => {
+    try {
+      const project = stmts.getProject.get(projectId, socket.user.id);
+      if (!project) {
+        socket.emit('build:error', { error: 'Project not found' });
+        return;
+      }
+
+      const { buildImage } = await import('./services/containerService.js');
+      const { join } = await import('node:path');
+      const { existsSync } = await import('node:fs');
+
+      const workspacePath = join(__dirname, '..', 'data', 'workspaces', String(socket.user.id), String(projectId));
+
+      // Check for Dockerfile
+      if (!existsSync(join(workspacePath, 'Dockerfile'))) {
+        socket.emit('build:error', { error: 'No Dockerfile found in project root. Create a Dockerfile first.' });
+        return;
+      }
+
+      const tag = `gsd-${socket.user.id}-${projectId}:latest`;
+      socket.emit('build:log', { data: `Building image ${tag}...\n` });
+
+      const imageId = await buildImage(workspacePath, tag, ({ stream, error }) => {
+        if (stream) socket.emit('build:log', { data: stream });
+        if (error) socket.emit('build:log', { data: `ERROR: ${error}\n` });
+      });
+
+      socket.emit('build:done', { tag, imageId });
+      console.log(`[build] ${tag} complete: ${imageId}`);
+    } catch (err) {
+      console.error('[build] error:', err.message);
+      socket.emit('build:error', { error: err.message });
+    }
+  });
+
+  // ── Docker Compose streaming ──────────────────────────────────────
+  socket.on('compose:up', async ({ projectId }) => {
+    try {
+      const project = stmts.getProject.get(projectId, socket.user.id);
+      if (!project) { socket.emit('compose:error', { error: 'Project not found' }); return; }
+
+      const { findComposeFile, composeUp } = await import('./services/composeService.js');
+      const workspacePath = join(__dirname, '..', 'data', 'workspaces', String(socket.user.id), String(projectId));
+
+      const composeFile = findComposeFile(workspacePath);
+      if (!composeFile) {
+        socket.emit('compose:error', { error: 'No docker-compose.yml found. Create one first.' });
+        return;
+      }
+
+      const projectName = `gsd-${socket.user.id}-${projectId}`;
+      const envVars = JSON.parse(project.env_vars || '{}');
+
+      socket.emit('compose:log', { data: `Starting compose stack: ${projectName}...\n` });
+
+      const result = await composeUp(workspacePath, projectName, {
+        onOutput: (line) => socket.emit('compose:log', { data: line + '\n' }),
+        env: envVars,
+      });
+
+      if (result.code === 0) {
+        // Get service status
+        const { composePs } = await import('./services/composeService.js');
+        const services = await composePs(workspacePath, projectName);
+        socket.emit('compose:done', { projectName, services });
+      } else {
+        socket.emit('compose:error', { error: `Compose exited with code ${result.code}` });
+      }
+    } catch (err) {
+      socket.emit('compose:error', { error: err.message });
+    }
+  });
+
+  socket.on('compose:down', async ({ projectId }) => {
+    try {
+      const project = stmts.getProject.get(projectId, socket.user.id);
+      if (!project) { socket.emit('compose:error', { error: 'Project not found' }); return; }
+
+      const { composeDown } = await import('./services/composeService.js');
+      const workspacePath = join(__dirname, '..', 'data', 'workspaces', String(socket.user.id), String(projectId));
+      const projectName = `gsd-${socket.user.id}-${projectId}`;
+
+      socket.emit('compose:log', { data: 'Stopping compose stack...\n' });
+
+      await composeDown(workspacePath, projectName, {
+        onOutput: (line) => socket.emit('compose:log', { data: line + '\n' }),
+      });
+
+      socket.emit('compose:stopped', { projectName });
+    } catch (err) {
+      socket.emit('compose:error', { error: err.message });
+    }
+  });
+
+  socket.on('compose:logs', async ({ projectId }) => {
+    try {
+      const project = stmts.getProject.get(projectId, socket.user.id);
+      if (!project) return;
+
+      const { composeLogs } = await import('./services/composeService.js');
+      const workspacePath = join(__dirname, '..', 'data', 'workspaces', String(socket.user.id), String(projectId));
+      const projectName = `gsd-${socket.user.id}-${projectId}`;
+
+      const proc = composeLogs(workspacePath, projectName);
+
+      proc.stdout.on('data', (data) => socket.emit('compose:log', { data: data.toString() }));
+      proc.stderr.on('data', (data) => socket.emit('compose:log', { data: data.toString() }));
+      proc.on('close', () => socket.emit('compose:log', { data: '[logs ended]\n' }));
+
+      socket.on('disconnect', () => { try { proc.kill(); } catch {} });
+    } catch (err) {
+      socket.emit('compose:error', { error: err.message });
+    }
+  });
+
+  // ── Container log streaming ──────────────────────────────────────
+  socket.on('container:logs', async ({ containerId }) => {
+    try {
+      const container = stmts.getContainer.get(containerId, socket.user.id);
+      if (!container) {
+        socket.emit('container:error', { containerId, error: 'Container not found' });
+        return;
+      }
+      const { streamLogs } = await import('./services/containerService.js');
+      const stream = await streamLogs(container.docker_id, { follow: true, tail: 100 });
+      stream.on('data', (chunk) => {
+        socket.emit('container:output', { containerId, data: chunk.toString() });
+      });
+      stream.on('end', () => {
+        socket.emit('container:output', { containerId, data: '\n[stream ended]\n' });
+      });
+      stream.on('error', (err) => {
+        socket.emit('container:error', { containerId, error: err.message });
+      });
+      // Clean up stream when socket disconnects
+      socket.on('disconnect', () => { try { stream.destroy(); } catch {} });
+    } catch (err) {
+      socket.emit('container:error', { containerId, error: err.message });
+    }
   });
 });
 
