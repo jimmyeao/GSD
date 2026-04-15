@@ -1,0 +1,13 @@
+{
+  "name": "gsd-frontend",
+  "version": "1.0.0",
+  "description": "Web frontend for GSD multi-agent system",
+  "type": "module",
+  "scripts": {
+    "start": "npx serve . -p 3000",
+    "dev": "npx serve . -p 3000 --no-clipboard"
+  },
+  "devDependencies": {
+    "serve": "^14.2.3"
+  }
+}
