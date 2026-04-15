@@ -52,7 +52,7 @@ db.exec(`
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
-    type            TEXT    NOT NULL CHECK(type IN ('video','image','slide')),
+    type            TEXT    NOT NULL CHECK(type IN ('video','image','slide','code')),
     filename        TEXT    NOT NULL,
     original_name   TEXT,
     title           TEXT,
@@ -62,7 +62,33 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_assets_user
     ON assets(user_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS projects (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name       TEXT    NOT NULL,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_projects_user
+    ON projects(user_id, created_at DESC);
+
+  CREATE TABLE IF NOT EXISTS containers (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    docker_id  TEXT,
+    image      TEXT    NOT NULL DEFAULT 'gsd-node:20',
+    status     TEXT    NOT NULL DEFAULT 'created' CHECK(status IN ('created','running','stopped','removed')),
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_containers_user
+    ON containers(user_id);
 `);
+
+// Migration: add env_vars column if missing
+try { db.exec("ALTER TABLE projects ADD COLUMN env_vars TEXT DEFAULT '{}'"); } catch { /* already exists */ }
 
 // Prepared statements
 const stmts = {
@@ -100,6 +126,24 @@ const stmts = {
     'INSERT INTO assets (user_id, conversation_id, type, filename, original_name, title, size_bytes) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ),
   deleteAsset: db.prepare('DELETE FROM assets WHERE id = ? AND user_id = ?'),
+
+  // Projects
+  insertProject: db.prepare('INSERT INTO projects (user_id, name) VALUES (?, ?)'),
+  getProject: db.prepare('SELECT * FROM projects WHERE id = ? AND user_id = ?'),
+  listProjects: db.prepare('SELECT id, name, created_at FROM projects WHERE user_id = ? ORDER BY created_at DESC'),
+  deleteProject: db.prepare('DELETE FROM projects WHERE id = ? AND user_id = ?'),
+
+  getProjectEnv: db.prepare('SELECT env_vars FROM projects WHERE id = ? AND user_id = ?'),
+  updateProjectEnv: db.prepare('UPDATE projects SET env_vars = ? WHERE id = ? AND user_id = ?'),
+
+  // Containers
+  insertContainer: db.prepare('INSERT INTO containers (project_id, user_id, image) VALUES (?, ?, ?)'),
+  getContainer: db.prepare('SELECT * FROM containers WHERE id = ? AND user_id = ?'),
+  listContainers: db.prepare('SELECT * FROM containers WHERE user_id = ? ORDER BY created_at DESC LIMIT 10'),
+  updateContainerStatus: db.prepare('UPDATE containers SET status = ?, docker_id = ? WHERE id = ?'),
+  deleteContainer: db.prepare('DELETE FROM containers WHERE id = ? AND user_id = ?'),
+  countUserContainers: db.prepare('SELECT COUNT(*) as count FROM containers WHERE user_id = ? AND status IN (\'created\',\'running\')'),
+  cleanStaleContainers: db.prepare('DELETE FROM containers WHERE user_id = ? AND docker_id IS NULL'),
 };
 
 export { db, stmts };

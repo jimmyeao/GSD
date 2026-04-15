@@ -1,6 +1,7 @@
 import { AGENTS, MODEL_BADGE_CLASS } from './agents.js';
 import { SocketClient } from './socketClient.js';
 import { Chat } from './chat.js';
+import { CodeView } from './codeView.js';
 import { getToken, getUser, isLoggedIn, login, register, logout, clearToken } from './auth.js';
 import { fetchConversations, fetchMessages, deleteConversation } from './conversations.js';
 import { fetchAssets, deleteAsset } from './assets.js';
@@ -8,6 +9,7 @@ import { fetchAssets, deleteAsset } from './assets.js';
 // ------------------------------------------------------------------ State
 let selectedAgent = AGENTS[0]; // RouterAgent default
 let client = null;
+let codeView = null;
 let isStreaming = false;
 let _optimiseTimer = null;
 let attachedFiles = []; // [{ name, content }]
@@ -56,9 +58,41 @@ const assetsPanel    = document.getElementById('assets-panel');
 const assetsGrid     = document.getElementById('assets-grid');
 const assetsEmpty    = document.getElementById('assets-empty');
 const assetsClose    = document.getElementById('assets-close');
+const codeViewContainer = document.getElementById('code-view-container');
+const chatModeBtn    = document.getElementById('chat-mode-btn');
+const codeModeBtn    = document.getElementById('code-mode-btn');
 
 // ------------------------------------------------------------------ Chat
 const chat = new Chat(chatMessages, handleSend);
+
+const LANG_EXT = { javascript: 'js', typescript: 'ts', python: 'py', html: 'html', css: 'css', json: 'json', sh: 'sh', go: 'go', rust: 'rs', java: 'java', sql: 'sql', ruby: 'rb', php: 'php', markdown: 'md' };
+
+chat.onOpenInEditor(async ({ code, lang }) => {
+  // Ensure code view is initialised
+  if (!codeView) {
+    setViewMode('code');
+    // wait a tick for init
+    await new Promise(r => setTimeout(r, 200));
+  }
+  if (!codeView) return;
+  const ext = LANG_EXT[lang] || lang || 'txt';
+  const filename = prompt('Save as:', `snippet.${ext}`);
+  if (!filename?.trim()) return;
+  // If a project is loaded, save to workspace
+  if (codeView._projectId) {
+    try {
+      const token = getToken();
+      await fetch(`${DEFAULT_URL}/workspace/${codeView._projectId}/file?path=${encodeURIComponent(filename.trim())}`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: 'file', content: code }),
+      });
+      await codeView._fileTree.refresh();
+    } catch { /* ignore — still open in editor */ }
+  }
+  codeView._editor.openFile(filename.trim(), code);
+  setViewMode('code');
+});
 
 // ------------------------------------------------------------------ Auth
 let authMode = 'login'; // or 'register'
@@ -366,6 +400,13 @@ function initConnection(url) {
     renderConversationList();
   });
 
+  client.on('containerOutput', ({ containerId, data }) => {
+    if (codeView) {
+      // Forward to code view's terminal
+      codeView._terminal?.appendOutput(data);
+    }
+  });
+
   client.connect();
 }
 
@@ -555,6 +596,34 @@ exampleBanner.addEventListener('click', () => {
     inputEl.focus();
   }
 });
+
+// ------------------------------------------------------------------ View mode toggle
+function setViewMode(mode) {
+  const isCode = mode === 'code';
+
+  // Toggle visibility — fully hide main chat when in code mode
+  chatMessages.style.display = isCode ? 'none' : '';
+  document.getElementById('input-area').style.display = isCode ? 'none' : '';
+  codeViewContainer.hidden = !isCode;
+
+  // Toggle button active states
+  chatModeBtn.classList.toggle('active', !isCode);
+  codeModeBtn.classList.toggle('active', isCode);
+
+  // Lazy-init the code view on first switch
+  if (isCode && !codeView) {
+    const token = getToken();
+    codeView = new CodeView(codeViewContainer, DEFAULT_URL, token, client);
+    codeView.init();
+  }
+
+  if (isCode && codeView) {
+    codeView.setVisible(true);
+  }
+}
+
+chatModeBtn.addEventListener('click', () => setViewMode('chat'));
+codeModeBtn.addEventListener('click', () => setViewMode('code'));
 
 // ------------------------------------------------------------------ Boot
 function boot() {

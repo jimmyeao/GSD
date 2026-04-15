@@ -72,6 +72,10 @@ export class SocketClient {
     this.socket.on('conversation:created', (data) => {
       this._emit('conversationCreated', data);
     });
+
+    this.socket.on('container:output', (data) => {
+      this._emit('containerOutput', data);
+    });
   }
 
   disconnect() {
