@@ -233,7 +233,7 @@ export async function generateVideo(endpoint, prompt, timeoutMs = 300_000) {
 
   const { prompt_id } = await queueRes.json();
   console.log(`[videoClient] t2v queued: ${prompt_id}`);
-  return pollForVideo(endpoint, prompt_id, timeoutMs);
+  return pollForVideo(endpoint, clientId, prompt_id, timeoutMs);
 }
 
 /**
@@ -265,5 +265,5 @@ export async function generateI2V(endpoint, prompt, imageData, timeoutMs = 300_0
 
   const { prompt_id } = await queueRes.json();
   console.log(`[videoClient] i2v queued: ${prompt_id} (image: ${imageName})`);
-  return pollForVideo(endpoint, prompt_id, timeoutMs);
+  return pollForVideo(endpoint, clientId, prompt_id, timeoutMs);
 }

@@ -17,7 +17,7 @@ router.use(expressAuth);
 
 router.post('/', async (req, res) => {
   try {
-    const { projectId, image } = req.body || {};
+    const { projectId, image, ports } = req.body || {};
     if (!projectId) return res.status(400).json({ error: 'projectId is required' });
 
     const project = stmts.getProject.get(projectId, req.user.id);
@@ -42,8 +42,11 @@ router.post('/', async (req, res) => {
     const envVars = JSON.parse(project.env_vars || '{}');
     const env = Object.entries(envVars).map(([k, v]) => `${k}=${v}`);
 
+    // Default expose common dev ports if none specified
+    const exposedPorts = Array.isArray(ports) && ports.length ? ports : [3000, 3001, 5000, 5173, 8000, 8080];
+
     // Create Docker container first, only save to DB if it succeeds
-    const dockerId = await containerService.createContainer(containerImage, workspacePath, { name: containerName, env });
+    const dockerId = await containerService.createContainer(containerImage, workspacePath, { name: containerName, env, exposedPorts });
     const result = stmts.insertContainer.run(projectId, req.user.id, containerImage);
     const containerId = result.lastInsertRowid;
     stmts.updateContainerStatus.run('created', dockerId, containerId);

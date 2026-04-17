@@ -57,6 +57,7 @@ export class Terminal {
     this._root = containerEl;
     this._lineCount = 0;
     this._onCommand = null;
+    this._onDiagnose = null;
     this._build();
   }
 
@@ -89,6 +90,9 @@ export class Terminal {
   /** Register a command input callback (for the input line). */
   onCommand(callback) { this._onCommand = callback; }
 
+  /** Register diagnose callback — sends terminal output to CoderAgent. */
+  onDiagnose(callback) { this._onDiagnose = callback; }
+
   /** Show/hide the panel. */
   setVisible(visible) {
     this._root.style.display = visible ? 'flex' : 'none';
@@ -103,13 +107,30 @@ export class Terminal {
     // Header
     const header = document.createElement('div');
     header.className = 'terminal-header';
-    header.innerHTML = '<span class="terminal-title">Terminal</span>';
+    const title = document.createElement('span');
+    title.className = 'terminal-title';
+    title.textContent = 'Terminal';
+    header.appendChild(title);
+
+    const btnGroup = document.createElement('div');
+    btnGroup.className = 'terminal-btn-group';
+
+    const diagnoseBtn = document.createElement('button');
+    diagnoseBtn.className = 'terminal-diagnose-btn';
+    diagnoseBtn.textContent = 'Diagnose';
+    diagnoseBtn.title = 'Send terminal output to CoderAgent for diagnosis';
+    diagnoseBtn.addEventListener('click', () => {
+      if (this._onDiagnose) this._onDiagnose();
+    });
+    btnGroup.appendChild(diagnoseBtn);
 
     const clearBtn = document.createElement('button');
     clearBtn.className = 'terminal-clear-btn';
     clearBtn.textContent = 'Clear';
     clearBtn.addEventListener('click', () => this.clear());
-    header.appendChild(clearBtn);
+    btnGroup.appendChild(clearBtn);
+
+    header.appendChild(btnGroup);
 
     this._root.appendChild(header);
 
