@@ -990,7 +990,29 @@ body {
 }
 .run-btn:hover { border-color: var(--green); color: var(--green); }
 .stop-btn:hover { border-color: var(--red); color: var(--red); }
-.run-btn:disabled, .stop-btn:disabled { opacity: .4; cursor: not-allowed; }
+.run-btn:disabled, .stop-btn:disabled, .restart-btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn-busy {
+  border-color: var(--amber) !important;
+  color: var(--amber) !important;
+  opacity: 1 !important;
+  animation: busy-pulse 1.2s ease-in-out infinite;
+}
+@keyframes busy-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .5; }
+}
+
+.restart-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-sec);
+  font-size: 12px;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: all .15s;
+}
+.restart-btn:hover:not(:disabled) { border-color: var(--amber); color: var(--amber); }
 
 .build-btn {
   background: none;
@@ -1414,7 +1436,7 @@ pre:hover .open-in-editor-btn { opacity: 1; }
 .terminal-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
   padding: 4px 10px;
   background: var(--bg-panel);
   border-bottom: 1px solid var(--border);
@@ -1424,6 +1446,22 @@ pre:hover .open-in-editor-btn { opacity: 1; }
   letter-spacing: .5px;
   font-weight: 600;
 }
+.terminal-header .terminal-title { flex: 1; }
+.terminal-btn-group { display: flex; gap: 4px; }
+.terminal-diagnose-btn, .terminal-clear-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 2px 8px;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+.terminal-diagnose-btn:hover { border-color: var(--accent); color: var(--accent); }
+.terminal-clear-btn:hover { border-color: var(--text-sec); color: var(--text-sec); }
 .terminal-output {
   flex: 1;
   overflow-y: auto;

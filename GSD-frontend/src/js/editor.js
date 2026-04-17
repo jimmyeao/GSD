@@ -26,14 +26,23 @@ function loadMonaco() {
   if (_monacoReady) return _monacoReady;
   _monacoReady = new Promise((resolve, reject) => {
     if (window.monaco) { resolve(window.monaco); return; }
-    const script = document.createElement('script');
-    script.src = `${MONACO_CDN}/loader.js`;
-    script.onload = () => {
+
+    const doLoad = () => {
       window.require.config({ paths: { vs: MONACO_CDN } });
       window.require(['vs/editor/editor.main'], () => resolve(window.monaco), reject);
     };
-    script.onerror = () => reject(new Error('Failed to load Monaco loader'));
-    document.head.appendChild(script);
+
+    // AMD loader already in page from index.html — just use it
+    if (typeof window.require !== 'undefined' && window.require.config) {
+      doLoad();
+    } else {
+      // Fallback: load the loader script
+      const script = document.createElement('script');
+      script.src = `${MONACO_CDN}/loader.js`;
+      script.onload = doLoad;
+      script.onerror = () => reject(new Error('Failed to load Monaco loader'));
+      document.head.appendChild(script);
+    }
   });
   return _monacoReady;
 }

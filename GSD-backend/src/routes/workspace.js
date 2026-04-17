@@ -101,6 +101,38 @@ router.put('/projects/:id/env', (req, res) => {
   res.json({ ok: true });
 });
 
+// ── Project type detection ─────────────────────────────────────────
+
+router.get('/:projectId/detect', (req, res) => {
+  if (!requireProject(req, res)) return;
+  const root = workspaceRoot(req.user.id, req.params.projectId);
+  mkdirSync(root, { recursive: true });
+
+  const has = (f) => existsSync(join(root, f));
+
+  // Priority: compose > dockerfile > detected runtime
+  if (has('docker-compose.yml') || has('docker-compose.yaml') || has('compose.yml') || has('compose.yaml')) {
+    return res.json({ type: 'compose' });
+  }
+  if (has('Dockerfile')) {
+    return res.json({ type: 'dockerfile' });
+  }
+  if (has('package.json')) {
+    try {
+      const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
+      const start = pkg.scripts?.dev ? 'npm run dev' : pkg.scripts?.start ? 'npm start' : 'node index.js';
+      return res.json({ type: 'node', image: 'node:20-slim', install: 'npm install', start });
+    } catch { return res.json({ type: 'node', image: 'node:20-slim', install: 'npm install', start: 'node index.js' }); }
+  }
+  if (has('requirements.txt')) {
+    return res.json({ type: 'python', image: 'python:3.12-slim', install: 'pip install -r requirements.txt', start: 'python main.py' });
+  }
+  if (has('go.mod')) {
+    return res.json({ type: 'go', image: 'golang:1.22-alpine', install: '', start: 'go run .' });
+  }
+  res.json({ type: 'unknown', image: 'node:20-slim' });
+});
+
 // ── File tree ──────────────────────────────────────────────────────
 
 router.get('/:projectId/tree', (req, res) => {

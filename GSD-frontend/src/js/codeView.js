@@ -29,6 +29,7 @@ export class CodeView {
     this._chatHistory = [];
     this._chatStreamEl = null;
     this._chatStreamBuffer = '';
+    this._terminalLog = [];
     this._composeMode = false;
     this._composeServices = [];
   }
@@ -94,25 +95,17 @@ export class CodeView {
     this._newProjectBtn = this._el('button', 'new-project-btn', '+ Project');
     this._newProjectBtn.addEventListener('click', () => this._createProject());
 
-    this._buildBtn = this._el('button', 'build-btn', 'Build');
+    this._restartBtn = this._el('button', 'restart-btn', 'Restart');
+    this._restartBtn.disabled = true;
     this._previewBtn = this._el('button', 'preview-btn', 'Preview');
     this._previewBtn.disabled = true;
     this._envBtn = this._el('button', 'env-btn', 'Env Vars');
-    this._imageSelect = this._el('select', 'image-select');
-    [['node:20-slim','Node 20'],['python:3.12-slim','Python 3.12'],['golang:1.22-alpine','Go 1.22'],['custom','Custom (Dockerfile)']].forEach(([v,l]) => {
-      const o = document.createElement('option'); o.value = v; o.textContent = l; this._imageSelect.appendChild(o);
-    });
-
-    // Compose controls
-    this._composeUpBtn = this._el('button', 'compose-up-btn', 'Compose Up');
-    this._composeDownBtn = this._el('button', 'compose-down-btn', 'Compose Down');
-    this._composeDownBtn.disabled = true;
 
     // Services status bar (shown below toolbar when compose is running)
     this._servicesBar = this._el('div', 'services-bar');
     this._servicesBar.hidden = true;
 
-    [this._projectSelect, this._newProjectBtn, this._imageSelect, this._buildBtn, this._runBtn, this._stopBtn, this._composeUpBtn, this._composeDownBtn, this._previewBtn, this._envBtn, termToggle].forEach(c => toolbar.appendChild(c));
+    [this._projectSelect, this._newProjectBtn, this._runBtn, this._restartBtn, this._stopBtn, this._previewBtn, this._envBtn, termToggle].forEach(c => toolbar.appendChild(c));
     this._wrap.appendChild(toolbar);
     this._wrap.insertBefore(this._servicesBar, this._wrap.children[1]);
 
@@ -145,6 +138,13 @@ export class CodeView {
     this._editor = new Editor(this._editorDiv);
     this._fileTree = new FileTree(this._sidebarDiv, this._url, this._token);
     this._terminal = new Terminal(this._terminalDiv);
+    // Intercept terminal output so CoderAgent can see it
+    const origAppend = this._terminal.appendOutput.bind(this._terminal);
+    this._terminal.appendOutput = (text) => {
+      origAppend(text);
+      this._terminalLog.push(text);
+      if (this._terminalLog.length > 200) this._terminalLog.shift();
+    };
   }
 
   _wireEvents() {
@@ -222,16 +222,18 @@ export class CodeView {
       const opt = this._projectSelect.selectedOptions[0];
       if (opt && opt.value) this.loadProject(opt.value, opt.textContent);
     });
-    this._runBtn.addEventListener('click', () => this._runContainer());
-    this._stopBtn.addEventListener('click', () => this._stopContainer());
+    this._runBtn.addEventListener('click', () => this._smartRun());
+    this._stopBtn.addEventListener('click', () => this._stopAll());
 
-    this._buildBtn.addEventListener('click', () => this._startBuild());
     this._previewBtn.addEventListener('click', () => this._openPreview());
     this._envBtn.addEventListener('click', () => this._toggleEnvPanel());
-    this._imageSelect.addEventListener('change', () => {
-      this._buildBtn.style.display = this._imageSelect.value === 'custom' ? '' : 'none';
+
+    this._terminal.onDiagnose(() => {
+      const output = this._terminalLog.slice(-80).join('\n');
+      if (!output.trim()) { this._terminal.appendOutput('No terminal output to diagnose.'); return; }
+      this._chatInput.value = `Diagnose the following terminal output and fix any errors:\n\n${output}`;
+      this._sendCodeMessage();
     });
-    this._buildBtn.style.display = 'none';
 
     this._terminal.onCommand(async (cmd) => {
       if (!this._containerId) { this._terminal.appendOutput('No running container. Click Run first.'); return; }
@@ -250,28 +252,22 @@ export class CodeView {
     };
     if (this._socket?.socket) this._socket.socket.on('container:output', this._logHandler);
 
+    this._restartBtn.addEventListener('click', () => this._restartProject());
+
+    // Build socket events
     if (this._socket?.socket) {
       this._socket.socket.on('build:log', ({ data }) => this._terminal.appendOutput(data.replace(/\n$/, '')));
       this._socket.socket.on('build:done', ({ tag }) => {
         this._terminal.appendOutput(`\nBuild complete: ${tag}`);
-        this._buildBtn.disabled = false;
-        this._buildBtn.textContent = 'Build';
-        if (!this._imageSelect.querySelector(`option[value="${tag}"]`)) {
-          const opt = document.createElement('option');
-          opt.value = tag; opt.textContent = `Built: ${tag}`;
-          this._imageSelect.insertBefore(opt, this._imageSelect.querySelector('option[value="custom"]'));
-        }
-        this._imageSelect.value = tag;
+        this._builtTag = tag;
+        // Auto-run container from built image
+        this._runContainerWithImage(tag);
       });
       this._socket.socket.on('build:error', ({ error }) => {
         this._terminal.appendOutput(`\nBuild failed: ${error}`);
-        this._buildBtn.disabled = false; this._buildBtn.textContent = 'Build';
+        this._setRunning(false);
       });
     }
-
-    // Compose buttons
-    this._composeUpBtn.addEventListener('click', () => this._composeStart());
-    this._composeDownBtn.addEventListener('click', () => this._composeStop());
 
     // Compose socket events
     if (this._socket?.socket) {
@@ -282,12 +278,9 @@ export class CodeView {
       this._socket.socket.on('compose:done', ({ projectName, services }) => {
         this._composeMode = true;
         this._composeServices = services || [];
-        this._composeUpBtn.disabled = false;
-        this._composeUpBtn.textContent = 'Compose Up';
-        this._composeDownBtn.disabled = false;
-        this._terminal.appendOutput(`\nCompose stack running: ${projectName}`);
+        this._setRunning(true);
+        this._terminal.appendOutput(`\nAll services running`);
         this._renderServicesBar();
-        // Auto-subscribe to logs
         if (this._socket?.socket) {
           this._socket.socket.emit('compose:logs', { projectId: this._projectId });
         }
@@ -295,16 +288,15 @@ export class CodeView {
 
       this._socket.socket.on('compose:error', ({ error }) => {
         this._terminal.appendOutput(`\nCompose error: ${error}`);
-        this._composeUpBtn.disabled = false;
-        this._composeUpBtn.textContent = 'Compose Up';
+        this._setRunning(false);
       });
 
-      this._socket.socket.on('compose:stopped', ({ projectName }) => {
+      this._socket.socket.on('compose:stopped', () => {
         this._composeMode = false;
         this._composeServices = [];
-        this._composeDownBtn.disabled = true;
         this._servicesBar.hidden = true;
-        this._terminal.appendOutput(`\nCompose stack stopped: ${projectName}`);
+        this._setRunning(false);
+        this._terminal.appendOutput('\nAll services stopped.');
       });
     }
 
@@ -358,10 +350,15 @@ export class CodeView {
       const res = await this._apiFetch('/workspace/projects');
       const data = await res.json();
       this._projectSelect.innerHTML = '<option value="">Select project...</option>';
-      (data.projects || []).forEach(p => {
+      const projects = data.projects || [];
+      projects.forEach(p => {
         const o = document.createElement('option'); o.value = p.id; o.textContent = p.name; this._projectSelect.appendChild(o);
       });
-    } catch (err) { this._terminal.appendOutput(`Failed to load projects: ${err.message}`); }
+      console.log(`[CodeView] Loaded ${projects.length} projects`);
+    } catch (err) {
+      console.error('[CodeView] Failed to load projects:', err);
+      this._terminal?.appendOutput?.(`Failed to load projects: ${err.message}`);
+    }
   }
 
   async _createProject() {
@@ -379,61 +376,131 @@ export class CodeView {
     } catch (err) { this._terminal.appendOutput(`Create failed: ${err.message}`); }
   }
 
-  async _runContainer() {
+  // ── Smart Run: auto-detects compose/dockerfile/runtime ──────────
+
+  async _smartRun() {
     if (!this._projectId) { this._terminal.appendOutput('Select a project first.'); return; }
     this._terminal.clear();
-    this._terminal.appendOutput('Creating container (pulling image if needed — this may take a moment)...');
-    this._runBtn.disabled = true;
+    this._terminal.appendOutput('Detecting project type...');
+    this._setBusy(true, 'Detecting...');
+
+    try {
+      const res = await this._apiFetch(`/workspace/${this._projectId}/detect`);
+      const info = await res.json();
+      this._terminal.appendOutput(`Detected: ${info.type}`);
+
+      if (info.type === 'compose') {
+        this._setBusy(true, 'Composing...');
+        this._terminal.appendOutput('Found docker-compose.yml — building & starting all services...');
+        this._socket.socket.emit('compose:up', { projectId: this._projectId });
+      } else if (info.type === 'dockerfile') {
+        this._setBusy(true, 'Building...');
+        this._terminal.appendOutput('Found Dockerfile — building image...');
+        this._socket.socket.emit('build:start', { projectId: this._projectId });
+        // build:done handler will auto-call _runContainerWithImage
+      } else {
+        // node, python, go, unknown — use base image + auto-install + auto-start
+        const image = info.image || 'node:20-slim';
+        this._setBusy(true, 'Pulling...');
+        this._terminal.appendOutput(`Using ${image}...`);
+        await this._runContainerWithImage(image, info.install, info.start);
+      }
+    } catch (err) {
+      this._terminal.appendOutput(`Run failed: ${err.message}`);
+      this._setRunning(false);
+    }
+  }
+
+  async _runContainerWithImage(image, installCmd, startCmd) {
     try {
       const res = await this._apiFetch('/sandbox', {
-        method: 'POST', body: JSON.stringify({ projectId: this._projectId, image: this._imageSelect.value === 'custom' ? undefined : this._imageSelect.value }),
+        method: 'POST', body: JSON.stringify({ projectId: this._projectId, image }),
       });
       const data = await res.json();
       this._containerId = data.container?.id;
       this._terminal.appendOutput(`Container created: ${data.container?.name || this._containerId}`);
 
       await this._apiFetch(`/sandbox/${this._containerId}/start`, { method: 'POST' });
+      this._terminal.appendOutput('Container started.');
 
-      const statusRes = await this._apiFetch(`/sandbox/${this._containerId}/status`);
-      const info = await statusRes.json();
-      this._terminal.appendOutput(`Container running — name: ${info.name}, IP: ${info.ip || 'pending'}`);
-      this._terminal.appendOutput('Use the $ prompt below to run commands. Example: node index.js, npm install, ls');
-      this._stopBtn.disabled = false;
-      this._previewBtn.disabled = false;
+      // Show port mappings
+      try {
+        const portsRes = await this._apiFetch(`/sandbox/${this._containerId}/ports`);
+        const portsData = await portsRes.json();
+        if (portsData.ports?.length) {
+          portsData.ports.forEach(p => {
+            this._terminal.appendOutput(`Port ${p.container} → http://${window.location.hostname}:${p.host}`);
+          });
+        }
+      } catch { /* ignore */ }
+
+      this._setRunning(true);
       if (this._socket?.socket) this._socket.socket.emit('container:logs', { containerId: this._containerId });
-    } catch (err) { this._terminal.appendOutput(`Run failed: ${err.message}`); this._runBtn.disabled = false; }
-  }
 
-  async _stopContainer() {
-    if (!this._containerId) return;
-    try {
-      await this._apiFetch(`/sandbox/${this._containerId}/stop`, { method: 'POST' });
-      this._terminal.appendOutput('Container stopped.');
+      // Auto-install and start
+      if (installCmd) {
+        this._terminal.appendOutput(`\nInstalling dependencies: ${installCmd}`);
+        try {
+          const r = await this._apiFetch(`/sandbox/${this._containerId}/exec`, {
+            method: 'POST', body: JSON.stringify({ cmd: installCmd }),
+          });
+          const d = await r.json();
+          if (d.output) this._terminal.appendOutput(d.output);
+        } catch (err) { this._terminal.appendOutput(`Install error: ${err.message}`); }
+      }
+      if (startCmd) {
+        this._terminal.appendOutput(`\nStarting app: ${startCmd}`);
+        try {
+          // Run start command in background (don't await — it's a long-running process)
+          this._apiFetch(`/sandbox/${this._containerId}/exec`, {
+            method: 'POST', body: JSON.stringify({ cmd: `${startCmd} &` }),
+          }).then(r => r.json()).then(d => { if (d.output) this._terminal.appendOutput(d.output); }).catch(() => {});
+        } catch { /* ignore */ }
+      }
     } catch (err) {
-      this._terminal.appendOutput(`Stop failed: ${err.message}`);
+      this._terminal.appendOutput(`Container failed: ${err.message}`);
+      this._setRunning(false);
     }
-    this._containerId = null;
-    this._runBtn.disabled = false;
-    this._stopBtn.disabled = true;
-    this._previewBtn.disabled = true;
   }
 
-  async _composeStart() {
-    if (!this._projectId) { this._terminal.appendOutput('Select a project first.'); return; }
-    if (!this._socket?.socket) { this._terminal.appendOutput('Not connected.'); return; }
-    this._terminal.clear();
-    this._terminal.appendOutput('Starting Docker Compose stack...');
-    this._composeUpBtn.disabled = true;
-    this._composeUpBtn.textContent = 'Starting...';
-    this._socket.socket.emit('compose:up', { projectId: this._projectId });
+  async _stopAll() {
+    this._terminal.appendOutput('Stopping...');
+    if (this._composeMode) {
+      this._socket?.socket?.emit('compose:down', { projectId: this._projectId });
+    }
+    if (this._containerId) {
+      try {
+        await this._apiFetch(`/sandbox/${this._containerId}/stop`, { method: 'POST' });
+      } catch { /* ignore */ }
+      this._containerId = null;
+    }
+    this._setRunning(false);
+    this._composeMode = false;
+    this._composeServices = [];
+    this._servicesBar.hidden = true;
   }
 
-  async _composeStop() {
-    if (!this._projectId) return;
-    if (!this._socket?.socket) return;
-    this._terminal.appendOutput('Stopping Docker Compose stack...');
-    this._composeDownBtn.disabled = true;
-    this._socket.socket.emit('compose:down', { projectId: this._projectId });
+  async _restartProject() {
+    this._terminal.appendOutput('Restarting...');
+    await this._stopAll();
+    await new Promise(r => setTimeout(r, 1000));
+    await this._smartRun();
+  }
+
+  _setBusy(busy, label = 'Working...') {
+    this._runBtn.disabled = busy;
+    this._runBtn.textContent = busy ? label : 'Run';
+    if (busy) this._runBtn.classList.add('btn-busy');
+    else this._runBtn.classList.remove('btn-busy');
+  }
+
+  _setRunning(running) {
+    this._runBtn.disabled = running;
+    this._runBtn.textContent = 'Run';
+    this._runBtn.classList.remove('btn-busy');
+    this._stopBtn.disabled = !running;
+    this._restartBtn.disabled = !running;
+    this._previewBtn.disabled = !running;
   }
 
   _renderServicesBar() {
@@ -450,35 +517,31 @@ export class CodeView {
       const ports = svc.Ports || '';
       pill.innerHTML = `<span class="service-dot"></span> ${this._escapeHtml(name)}`;
       if (ports) pill.title = ports;
-      const portMatch = ports.match(/:(\d+)->/);
+      const portMatch = ports.match(/0\.0\.0\.0:(\d+)/);
       if (portMatch && isRunning) {
         pill.style.cursor = 'pointer';
         pill.addEventListener('click', () => {
-          const port = portMatch[1];
-          const previewUrl = `${this._url}/preview/${svc.ID || ''}/?port=${port}`;
-          if (svc.ID) { window.open(previewUrl, '_blank'); }
-          else { this._terminal.appendOutput(`Service ${name} available on host port ${port}`); }
+          const hostPort = portMatch[1];
+          window.open(`http://${window.location.hostname}:${hostPort}`, '_blank');
+          this._terminal.appendOutput(`Preview: http://${window.location.hostname}:${hostPort}`);
         });
       }
       this._servicesBar.appendChild(pill);
     });
   }
 
-  async _startBuild() {
-    if (!this._projectId) { this._terminal.appendOutput('Select a project first.'); return; }
-    if (!this._socket?.socket) { this._terminal.appendOutput('Not connected.'); return; }
-    this._terminal.clear();
-    this._terminal.appendOutput('Starting Docker build...');
-    this._buildBtn.disabled = true;
-    this._buildBtn.textContent = 'Building...';
-    this._socket.socket.emit('build:start', { projectId: this._projectId });
-  }
-
   _openPreview() {
-    if (!this._containerId) { this._terminal.appendOutput('No running container. Click Run first.'); return; }
+    if (!this._containerId && !this._composeMode) {
+      this._terminal.appendOutput('No running services. Click Run first.');
+      return;
+    }
     const port = prompt('Port to preview:', '3000');
     if (!port) return;
-    window.open(`${this._url}/preview/${this._containerId}/?port=${port}`, '_blank');
+    if (this._containerId) {
+      window.open(`${this._url}/preview/${this._containerId}/?port=${port}`, '_blank');
+    } else {
+      window.open(`http://${window.location.hostname}:${port}`, '_blank');
+    }
     this._terminal.appendOutput(`Preview opened: port ${port}`);
   }
 
@@ -550,8 +613,13 @@ export class CodeView {
     this._chatSendBtn.disabled = true;
     this._chatInput.disabled = true;
 
+    // Include recent terminal output so CoderAgent can see errors/logs
+    const termContext = this._terminalLog.length
+      ? `\n\n[Terminal output (last ${Math.min(this._terminalLog.length, 50)} lines)]:\n${this._terminalLog.slice(-50).join('\n')}`
+      : '';
+
     this._socket.socket.emit('code:message', {
-      content,
+      content: content + termContext,
       projectId: this._projectId,
       history: this._chatHistory.slice(-10),
     });
