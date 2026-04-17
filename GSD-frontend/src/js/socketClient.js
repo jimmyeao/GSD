@@ -95,6 +95,10 @@ export class SocketClient {
     this.socket.emit('message', payload);
   }
 
+  stopStream() {
+    if (this.socket) this.socket.emit('stop:stream');
+  }
+
   optimisePrompt(content, agent) {
     if (!this.socket || !this.connected) {
       throw new Error('Not connected to backend.');

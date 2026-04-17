@@ -5,6 +5,7 @@ import { CodeView } from './codeView.js';
 import { getToken, getUser, isLoggedIn, login, register, logout, clearToken } from './auth.js';
 import { fetchConversations, fetchMessages, deleteConversation } from './conversations.js';
 import { fetchAssets, deleteAsset } from './assets.js';
+import { isSupported as voiceSupported, createRecognition, speak, stopSpeaking, isSpeaking, setTTSBackend } from './voice.js';
 
 // ------------------------------------------------------------------ State
 let selectedAgent = AGENTS[0]; // RouterAgent default
@@ -19,6 +20,7 @@ let conversations = [];
 // Derive the backend URL from whatever hostname the browser is using,
 // so Tailscale / remote access works without manual configuration.
 const DEFAULT_URL = `${window.location.protocol}//${window.location.hostname}:5000`;
+setTTSBackend(DEFAULT_URL);
 
 // ------------------------------------------------------------------ DOM refs
 const sidebar        = document.getElementById('sidebar');
@@ -61,6 +63,67 @@ const assetsClose    = document.getElementById('assets-close');
 const codeViewContainer = document.getElementById('code-view-container');
 const chatModeBtn    = document.getElementById('chat-mode-btn');
 const codeModeBtn    = document.getElementById('code-mode-btn');
+const micBtn         = document.getElementById('mic-btn');
+const speakToggle    = document.getElementById('speak-toggle');
+
+// ------------------------------------------------------------------ Voice
+let autoSpeak = false;
+let recognition = null;
+
+if (voiceSupported().recognition && micBtn) {
+  recognition = createRecognition({
+    onResult: (text) => {
+      inputEl.value += text;
+      autoResizeTextarea();
+    },
+    onInterim: (text) => {
+      inputEl.placeholder = text || 'Listening...';
+    },
+    onComplete: (text) => {
+      // Auto-send after silence
+      inputEl.value = text;
+      autoResizeTextarea();
+      setTimeout(() => handleSend(), 300);
+    },
+    onEnd: () => {
+      micBtn.classList.remove('mic-active');
+      inputEl.placeholder = 'Type a prompt… (Shift+Enter for new line)';
+    },
+    onError: (msg) => chat.addErrorMessage(msg),
+  });
+
+  micBtn.addEventListener('click', () => {
+    if (recognition.isActive) {
+      recognition.stop();
+    } else {
+      // Interrupt Alice if she's speaking
+      if (isSpeaking()) stopSpeaking();
+      recognition.start();
+      micBtn.classList.add('mic-active');
+    }
+  });
+} else if (micBtn) {
+  micBtn.disabled = true;
+  micBtn.title = 'Speech recognition not supported in this browser';
+}
+
+if (speakToggle) {
+  speakToggle.addEventListener('click', () => {
+    autoSpeak = !autoSpeak;
+    speakToggle.classList.toggle('speak-active', autoSpeak);
+    speakToggle.textContent = autoSpeak ? '🔊' : '🔇';
+    if (!autoSpeak) {
+      stopSpeaking();
+    } else if (isStreaming && chat._streamBuffer) {
+      // Start speaking whatever has been streamed so far
+      speak(chat._streamBuffer);
+    } else if (chat.history.length) {
+      // Speak the last assistant message
+      const last = chat.history[chat.history.length - 1];
+      if (last.role === 'assistant') speak(last.content);
+    }
+  });
+}
 
 // ------------------------------------------------------------------ Chat
 const chat = new Chat(chatMessages, handleSend);
@@ -376,6 +439,11 @@ function initConnection(url) {
   client.on('done', () => {
     try { chat.finaliseStream(); } catch (e) { console.error('[done] finaliseStream error:', e); }
     setStreaming(false);
+    // Auto-speak the response if enabled
+    if (autoSpeak && chat.history.length) {
+      const last = chat.history[chat.history.length - 1];
+      if (last.role === 'assistant') speak(last.content);
+    }
   });
 
   client.on('serverError', ({ message }) => {
@@ -484,8 +552,14 @@ if (attachedFilesEl) attachedFilesEl.addEventListener('click', e => {
 
 // ------------------------------------------------------------------ Send
 function handleSend() {
+  // If streaming, clicking Send acts as Stop
+  if (isStreaming) {
+    if (client) client.stopStream();
+    stopSpeaking();
+    return;
+  }
   const text = inputEl.value.trim();
-  if (!text || isStreaming) return;
+  if (!text) return;
 
   if (!client || !client.connected) {
     chat.addErrorMessage('Not connected to backend. Check Settings and connect first.');
@@ -524,8 +598,9 @@ function setStatus(state, label) {
 
 function setStreaming(active) {
   isStreaming = active;
-  sendBtn.disabled = active;
-  sendBtn.textContent = active ? '…' : 'Send';
+  sendBtn.disabled = false; // always clickable — acts as Stop when streaming
+  sendBtn.textContent = active ? 'Stop' : 'Send';
+  sendBtn.classList.toggle('stop-mode', active);
   optimiseBtn.disabled = active;
 }
 
