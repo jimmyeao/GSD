@@ -6,6 +6,7 @@
 import { Editor } from './editor.js';
 import { FileTree } from './fileTree.js';
 import { Terminal } from './terminal.js';
+import { isSupported as voiceSupported, createRecognition, speak, stopSpeaking, isSpeaking } from './voice.js';
 
 export class CodeView {
   /**
@@ -127,7 +128,11 @@ export class CodeView {
     this._chatInput.placeholder = 'Ask CoderAgent to write code...';
     this._chatInput.rows = 2;
     this._chatSendBtn = this._el('button', 'code-chat-send', 'Send');
-    chatInputRow.append(this._chatInput, this._chatSendBtn);
+    this._chatMicBtn = this._el('button', 'mic-btn', '🎤');
+    this._chatMicBtn.title = 'Voice input';
+    this._chatSpeakBtn = this._el('button', 'speak-toggle', '🔊');
+    this._chatSpeakBtn.title = 'Auto-speak responses';
+    chatInputRow.append(this._chatMicBtn, this._chatInput, this._chatSpeakBtn, this._chatSendBtn);
     this._chatPanel.append(chatHeader, this._chatMessages, chatInputRow);
 
     layout.append(this._sidebarDiv, main, this._chatPanel);
@@ -300,6 +305,34 @@ export class CodeView {
       });
     }
 
+    // Chat voice
+    this._chatAutoSpeak = false;
+    if (voiceSupported().recognition) {
+      this._chatRecognition = createRecognition({
+        onResult: (text) => { this._chatInput.value += text; },
+        onInterim: (text) => { this._chatInput.placeholder = text || 'Listening...'; },
+        onComplete: (text) => {
+          this._chatInput.value = text;
+          setTimeout(() => this._sendCodeMessage(), 300);
+        },
+        onEnd: () => { this._chatMicBtn.classList.remove('mic-active'); this._chatInput.placeholder = 'Ask CoderAgent to write code...'; },
+        onError: (msg) => this._terminal.appendOutput(`Voice: ${msg}`),
+      });
+      this._chatMicBtn.addEventListener('click', () => {
+        if (this._chatRecognition.isActive) { this._chatRecognition.stop(); }
+        else {
+          if (isSpeaking()) stopSpeaking(); // interrupt Alice
+          this._chatRecognition.start(); this._chatMicBtn.classList.add('mic-active');
+        }
+      });
+    } else { this._chatMicBtn.disabled = true; }
+
+    this._chatSpeakBtn.addEventListener('click', () => {
+      this._chatAutoSpeak = !this._chatAutoSpeak;
+      this._chatSpeakBtn.classList.toggle('speak-active', this._chatAutoSpeak);
+      if (!this._chatAutoSpeak) stopSpeaking();
+    });
+
     // Chat send
     this._chatSendBtn.addEventListener('click', () => this._sendCodeMessage());
     this._chatInput.addEventListener('keydown', e => {
@@ -333,6 +366,7 @@ export class CodeView {
             this._chatStreamEl.innerHTML = marked.parse(this._chatStreamBuffer);
           }
           this._chatHistory.push({ role: 'assistant', content: this._chatStreamBuffer });
+          if (this._chatAutoSpeak) speak(this._chatStreamBuffer);
         }
         this._chatStreamEl = null; this._chatStreamBuffer = '';
         this._chatSendBtn.disabled = false; this._chatInput.disabled = false;

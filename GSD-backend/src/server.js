@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import { createServer } from 'node:http';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { Server } from 'socket.io';
 import { config } from './config.js';
 import { getAgent } from './agents/registry.js';
@@ -23,7 +24,22 @@ import previewRoutes from './routes/preview.js';
 import { mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
 
 const app = express();
-const httpServer = createServer(app);
+// Use HTTPS if cert files exist, otherwise HTTP
+let httpServer;
+try {
+  const { readFileSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const __dir = dirname(fileURLToPath(import.meta.url));
+  const certPath = join(__dir, '..', 'cert.pem');
+  const keyPath = join(__dir, '..', 'key.pem');
+  readFileSync(certPath); // test existence
+  httpServer = createHttpsServer({ cert: readFileSync(certPath), key: readFileSync(keyPath) }, app);
+  console.log('[server] HTTPS enabled');
+} catch {
+  httpServer = createHttpServer(app);
+  console.log('[server] HTTP mode (no cert.pem/key.pem found)');
+}
 
 const io = new Server(httpServer, {
   cors: config.cors,
@@ -48,6 +64,22 @@ app.use('/assets', assetsRoutes);
 app.use('/workspace', workspaceRoutes);
 app.use('/sandbox', sandboxRoutes);
 app.use('/preview', previewRoutes);
+
+// ── Text-to-speech via Piper ──────────────────────────────────────
+app.post('/tts', express.json(), async (req, res) => {
+  const text = req.body?.text;
+  if (!text?.trim()) return res.status(400).json({ error: 'text required' });
+  try {
+    const { textToSpeech } = await import('./services/ttsService.js');
+    const wav = await textToSpeech(text, { speed: req.body.speed });
+    res.setHeader('Content-Type', 'audio/wav');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(wav);
+  } catch (err) {
+    console.error('[tts] error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // ── ComfyUI image proxy ──────────────────────────────────────────────
 // Fetches the image from the local ComfyUI instance and re-serves it so
@@ -199,31 +231,45 @@ io.on('connection', (socket) => {
     const messages = buildMessages(agentDef.systemPrompt, history, content);
 
     let fullResponse = '';
+    const streamAbort = new AbortController();
+    const onStop = () => streamAbort.abort();
+    socket.once('stop:stream', onStop);
+
     try {
       const stream = streamCompletion(
         modelCfg.endpoint,
         modelCfg.model,
         messages,
         {
-          signal: AbortSignal.timeout(modelCfg.timeout),
+          signal: streamAbort.signal,
           onThinking: () => socket.emit('thinking', {}),
           noThink: agentDef.noThink ?? false,
         },
       );
 
       for await (const token of stream) {
+        if (streamAbort.signal.aborted) break;
         fullResponse += token;
         socket.emit('token', { token });
       }
 
-      // Persist assistant response
-      stmts.insertMessage.run(convId, 'assistant', agentId, fullResponse);
-      stmts.touchConversation.run(convId);
+      // Persist whatever we got (even if stopped early)
+      if (fullResponse) {
+        stmts.insertMessage.run(convId, 'assistant', agentId, fullResponse);
+        stmts.touchConversation.run(convId);
+      }
 
       socket.emit('done', { agent: agentId });
-      console.log(`[${agentId}] stream complete`);
+      console.log(`[${agentId}] stream complete${streamAbort.signal.aborted ? ' (stopped by user)' : ''}`);
     } catch (err) {
-      if (err instanceof LLMUnavailableError) {
+      // If user stopped, still save what we have and emit done
+      if (streamAbort.signal.aborted) {
+        if (fullResponse) {
+          stmts.insertMessage.run(convId, 'assistant', agentId, fullResponse);
+          stmts.touchConversation.run(convId);
+        }
+        socket.emit('done', { agent: agentId });
+      } else if (err instanceof LLMUnavailableError) {
         await streamDemo(socket, agentId, content, modelCfg.endpoint, convId);
       } else {
         console.error(`[${agentId}] error:`, err.message);
@@ -872,7 +918,8 @@ for (const id of ['AlertAgent','AnalystAgent','ClientBriefAgent','DemoAgent','De
 
 // ── Start ────────────────────────────────────────────────────────────
 httpServer.listen(config.port, () => {
-  console.log(`GSD backend listening on http://localhost:${config.port}`);
+  const proto = httpServer.cert ? 'https' : 'http';
+  console.log(`GSD backend listening on ${proto}://localhost:${config.port}`);
   console.log(`Demo mode: ${config.demoMode ? 'ON' : 'OFF'}`);
   console.log(`General LLM: ${config.models.general.endpoint}`);
   console.log(`Coder LLM:   ${config.models.coder.endpoint}`);

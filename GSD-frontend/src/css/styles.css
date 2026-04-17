@@ -617,6 +617,42 @@ body {
 }
 #send-btn:hover:not(:disabled)  { background: #449e99; }
 #send-btn:disabled { opacity: .4; cursor: not-allowed; }
+#send-btn.stop-mode {
+  background: var(--red);
+  opacity: 1;
+  cursor: pointer;
+}
+
+/* Voice buttons */
+.mic-btn, .speak-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  height: 42px;
+  padding: 0 10px;
+  flex-shrink: 0;
+  transition: all .15s;
+}
+.mic-btn:hover, .speak-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.mic-btn:disabled { opacity: .3; cursor: not-allowed; }
+.mic-active {
+  background: #3a1515 !important;
+  border-color: var(--red) !important;
+  color: var(--red) !important;
+  animation: mic-pulse 1s ease-in-out infinite;
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(229, 23, 63, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(229, 23, 63, 0); }
+}
+.speak-active {
+  background: var(--accent-dim) !important;
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
 
 #optimise-status {
   display: flex;
@@ -1612,6 +1648,13 @@ pre:hover .open-in-editor-btn { opacity: 1; }
 }
 .code-chat-send:hover:not(:disabled) { opacity: .85; }
 .code-chat-send:disabled { opacity: .4; cursor: not-allowed; }
+.code-chat-input-row .mic-btn,
+.code-chat-input-row .speak-toggle {
+  height: 32px;
+  font-size: 11px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm);
+}
 
 /* ---------------------------------------------------------------- Responsive */
 @media (max-width: 640px) {
