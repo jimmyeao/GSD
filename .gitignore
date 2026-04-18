@@ -5,3 +5,5 @@ comfyui-env/
 *.log
 dist/
 .DS_Store
+GSD-backend/data/assets/2/gsd_video_00005_.mp4
+GSD-backend/data/assets/2/gsd_video_00006_.mp4

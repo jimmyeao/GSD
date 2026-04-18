@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Reminder App</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            width: 100%;
+            max-width: 500px;
+            padding: 30px;
+        }
+
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 25px;
+            font-size: 24px;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            padding: 12px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        button {
+            padding: 12px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .record-btn {
+            background: #667eea;
+            color: white;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .record-btn:hover {
+            background: #5a6fd6;
+            transform: translateY(-2px);
+        }
+
+        .record-btn.listening {
+            background: #ff6b6b;
+            animation: pulse 1.5s infinite;
+        }
+
+        .add-btn {
+            background: #4CAF50;
+            color: white;
+        }
+
+        .add-btn:hover {
+            background: #45a049;
+            transform: translateY(-2px);
+        }
+
+        .add-btn:disabled {
+            background: #cccccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .status {
+            text-align: center;
+            margin-bottom: 15px;
+            color: #666;
+            min-height: 24px;
+        }
+
+        .reminders-list {
+            list-style: none;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .reminders-list li {
+            background: #f8f9fa;
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            animation: fadeIn 0.3s ease-in;
+        }
+
+        .reminders-list li:hover {
+            background: #e9ecef;
+        }
+
+        .reminders-list li span {
+            flex: 1;
+            word-break: break-word;
+        }
+
+        .delete-btn {
+            background: #ff6b6b;
+            color: white;
+            padding: 8px 12px;
+            margin-left: 10px;
+        }
+
+        .delete-btn:hover {
+            background: #ee5a5a;
+        }
+
+        .empty-state {
+            text-align: center;
+            color: #999;
+            padding: 30px 0;
+        }
+
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(255, 107, 107, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 107, 107, 0); }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .recording-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #ff6b6b;
+            border-radius: 50%;
+            animation: pulse 1.5s infinite;
+        }
+
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+            justify-content: center;
+        }
+
+        .clear-btn {
+            background: #6c757d;
+            color: white;
+        }
+
+        .clear-btn:hover {
+            background: #5a6268;
+        }
+
+        .voice-enabled {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            color: #4CAF50;
+            font-size: 14px;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎙️ Voice Reminder App</h1>
+        
+        <div class="voice-enabled" id="voiceStatus">
+            <span class="recording-indicator" style="width: 6px; height: 6px; margin-right: 5px;"></span>
+            Voice Input Enabled
+        </div>
+
+        <div class="status" id="statusMessage">Click the microphone to start recording your reminder</div>
+
+        <div class="input-group">
+            <input type="text" id="reminderInput" placeholder="Your reminder will appear here..." disabled>
+            <button class="record-btn" id="recordBtn">
+                🎤
+            </button>
+        </div>
+        
+        <button class="add-btn" id="addBtn" disabled>Add Reminder</button>
+
+        <ul class="reminders-list" id="remindersList">
+            <li class="empty-state">No reminders yet. Record one using the microphone!</li>
+        </ul>
+
+        <div class="controls">
+            <button class="clear-btn" id="clearBtn">Clear All</button>
+        </div>
+    </div>
+
+    <script>
+        // Check browser support for Web Speech API
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const recognition = SpeechRecognition ? new SpeechRecognition() : null;
+        const recognitionEng = window.speechSynthesis ? window.speechSynthesis : null;
+
+        // DOM elements
+        const recordBtn = document.getElementById('recordBtn');
+        const addBtn = document.getElementById('addBtn');
+        const reminderInput = document.getElementById('reminderInput');
+        const remindersList = document.getElementById('remindersList');
+        const statusMessage = document.getElementById('statusMessage');
+        const clearBtn = document.getElementById('clearBtn');
+
+        let isListening = false;
+        let currentReminders = [];
+
+        // Initialize voice recognition
+        if (recognition) {
+            recognition.continuous = false;
+            recognition.lang = 'en-US';
+            recognition.interimResults = false;
+
+            recognition.onstart = () => {
+                isListening = true;
+                recordBtn.classList.add('listening');
+                recordBtn.innerHTML = '🔴';
+                statusMessage.textContent = 'Listening... Speak now!';
+                reminderInput.placeholder = 'Listening...';
+            };
+
+            recognition.onend = () => {
+                isListening = false;
+                recordBtn.classList.remove('listening');
+                recordBtn.innerHTML = '🎤';
+                statusMessage.textContent = 'Recording finished. Click "Add Reminder" to save.';
+            };
+
+            recognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                reminderInput.value = transcript;
+                statusMessage.textContent = 'Voice recognized: "' + transcript + '"';
+                
+                // Enable the add button
+                addBtn.disabled = false;
+            };
+
+            recognition.onerror = (event) => {
+                isListening = false;
+                recordBtn.classList.remove('listening');
+                recordBtn.innerHTML = '🎤';
+                statusMessage.textContent = 'Error: ' + event.error;
+            };
+        } else {
+            statusMessage.textContent = 'Voice recognition not supported in this browser. Please use Chrome, Edge, or Safari.';
+            recordBtn.disabled = true;
+            recordBtn.style.opacity = '0.5';
+        }
+
+        // Toggle recording
+        recordBtn.addEventListener('click', () => {
+            if (isListening) {
+                recognition.stop();
+            } else {
+                if (recognition) {
+                    recognition.start();
+                }
+            }
+        });
+
+        // Add reminder
+        addBtn.addEventListener('click', () => {
+            const text = reminderInput.value.trim();
+            
+            if (text) {
+                addReminder(text);
+                reminderInput.value = '';
+                addBtn.disabled = true;
+                statusMessage.textContent = 'Reminder added successfully!';
+                
+                // Announce the reminder
+                if (recognitionEng) {
+                    const utterance = new SpeechSynthesisUtterance('Reminder added: ' + text);
+                    recognitionEng.speak(utterance);
+                }
+            } else {
+                statusMessage.textContent = 'Please record or enter a reminder first.';
+            }
+        });
+
+        // Add reminder to list
+        function addReminder(text) {
+            const reminder = {
+                id: Date.now(),
+                text: text
+            };
+            
+            currentReminders.push(reminder);
+            renderReminders();
+        }
+
+        // Delete reminder
+        function deleteReminder(id) {
+            currentReminders = currentReminders.filter(reminder => reminder.id !== id);
+            renderReminders();
+        }
+
+        // Clear all reminders
+        clearBtn.addEventListener('click', () => {
+            if (currentReminders.length > 0) {
+                currentReminders = [];
+                renderReminders();
+                statusMessage.textContent = 'All reminders cleared.';
+            }
+        });
+
+        // Render reminders
+        function renderReminders() {
+            if (currentReminders.length === 0) {
+                remindersList.innerHTML = '<li class="empty-state">No reminders yet. Record one using the microphone!</li>';
+                return;
+            }
+
+            remindersList.innerHTML = '';
+            currentReminders.forEach(reminder => {
+                const li = document.createElement('li');
+                li.innerHTML = `
+                    <span>${escapeHtml(reminder.text)}</span>
+                    <button class="delete-btn" data-id="${reminder.id}">❌</button>
+                `;
+                
+                li.querySelector('.delete-btn').addEventListener('click', () => {
+                    deleteReminder(reminder.id);
+                });
+                
+                remindersList.appendChild(li);
+            });
+        }
+
+        // Helper function to escape HTML
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Add some sample data for demonstration
+        const sampleReminders = [
+            'Buy groceries',
+            'Call mom',
+            'Team meeting at 3 PM'
+        ];
+
+        sampleReminders.forEach(reminder => {
+            addReminder(reminder);
+        });
+
+        statusMessage.textContent = 'Ready to record! Click the microphone button to start.';
+    </script>
+</body>
+</html>

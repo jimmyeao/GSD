@@ -5,7 +5,7 @@ import { CodeView } from './codeView.js';
 import { getToken, getUser, isLoggedIn, login, register, logout, clearToken } from './auth.js';
 import { fetchConversations, fetchMessages, deleteConversation } from './conversations.js';
 import { fetchAssets, deleteAsset } from './assets.js';
-import { isSupported as voiceSupported, createRecognition, speak, stopSpeaking, isSpeaking, setTTSBackend } from './voice.js';
+import { isSupported as voiceSupported, createRecognition, speak, stopSpeaking, isSpeaking, setTTSBackend, getSpeechQueue } from './voice.js';
 
 // ------------------------------------------------------------------ State
 let selectedAgent = AGENTS[0]; // RouterAgent default
@@ -97,7 +97,7 @@ if (voiceSupported().recognition && micBtn) {
       recognition.stop();
     } else {
       // Interrupt Alice if she's speaking
-      if (isSpeaking()) stopSpeaking();
+      stopSpeaking();
       recognition.start();
       micBtn.classList.add('mic-active');
     }
@@ -115,10 +115,10 @@ if (speakToggle) {
     if (!autoSpeak) {
       stopSpeaking();
     } else if (isStreaming && chat._streamBuffer) {
-      // Start speaking whatever has been streamed so far
-      speak(chat._streamBuffer);
+      // Start speaking what's been streamed so far, then continue with queue
+      getSpeechQueue().reset();
+      getSpeechQueue().push(chat._streamBuffer);
     } else if (chat.history.length) {
-      // Speak the last assistant message
       const last = chat.history[chat.history.length - 1];
       if (last.role === 'assistant') speak(last.content);
     }
@@ -434,16 +434,15 @@ function initConnection(url) {
 
   client.on('token', ({ token }) => {
     chat.appendToken(token);
+    // Stream TTS: feed tokens to speech queue as they arrive
+    if (autoSpeak) getSpeechQueue().push(token);
   });
 
   client.on('done', () => {
     try { chat.finaliseStream(); } catch (e) { console.error('[done] finaliseStream error:', e); }
     setStreaming(false);
-    // Auto-speak the response if enabled
-    if (autoSpeak && chat.history.length) {
-      const last = chat.history[chat.history.length - 1];
-      if (last.role === 'assistant') speak(last.content);
-    }
+    // Flush remaining text to speech queue
+    if (autoSpeak) getSpeechQueue().flush();
   });
 
   client.on('serverError', ({ message }) => {
@@ -555,9 +554,11 @@ function handleSend() {
   // If streaming, clicking Send acts as Stop
   if (isStreaming) {
     if (client) client.stopStream();
-    stopSpeaking();
+    stopSpeaking(); // also stops the speech queue
     return;
   }
+  // Reset speech queue for new conversation turn
+  getSpeechQueue().reset();
   const text = inputEl.value.trim();
   if (!text) return;
 
