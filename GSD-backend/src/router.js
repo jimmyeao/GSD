@@ -17,6 +17,26 @@ import { AGENT_IDS } from './agents/registry.js';
  * The first matching rule wins.
  */
 const ROUTING_RULES = [
+  // Mail + calendar — routed before everything else because keywords like
+  // "send", "schedule", "reply" are otherwise ambiguous.
+  {
+    agent: 'MailAgent',
+    patterns: [
+      /\bemail\b/i,
+      /\bmail(?:\s*box|\s*server)?\b/i,
+      /\binbox\b/i,
+      /\bgmail\b/i,
+      /\boutlook\b/i,
+      /\bcalendar\b/i,
+      /\bmeeting\b/i,
+      /\bevent\b.{0,20}\b(create|schedule|invite|cancel|delete|update|move)\b/i,
+      /\b(create|schedule|set\s+up|book)\b.{0,20}\bmeeting\b/i,
+      /\breply\s+to\b/i,
+      /\bsend\b.{0,20}\b(email|mail|message|reply)\b/i,
+      /\bschedule\s+(a|an)\b.{0,20}\b(meeting|call|event)\b/i,
+      /\bunread\s+(emails?|messages?)\b/i,
+    ],
+  },
   // Diagrams — checked before image so "draw a mermaid/flowchart" routes correctly
   {
     agent: 'DiagramAgent',
@@ -292,9 +312,28 @@ export function routeByKeyword(prompt) {
  * Falls back to keyword routing on error.
  */
 export async function routeWithLLM(prompt, llmEndpoint, model) {
+  // Keyword match first — deterministic and fast. Only call the LLM if no
+  // keyword rule matches (routeByKeyword returns 'AssistantAgent' as the
+  // default). This prevents the LLM from second-guessing clear matches like
+  // "inbox" → MailAgent and picking LogWatchAgent instead.
+  const keywordHit = routeByKeyword(prompt);
+  if (keywordHit !== 'AssistantAgent') return keywordHit;
+
   const { complete, LLMUnavailableError } = await import('./agents/llmClient.js');
-  const systemMsg = `You are a routing agent. Reply with ONLY the agent name — no other text.
-Choose from: ${AGENT_IDS.join(', ')}.`;
+  const { AGENT_REGISTRY } = await import('./agents/registry.js');
+
+  // Build a short catalog so the LLM knows what each agent is for.
+  const catalog = AGENT_IDS.map(id => {
+    const def = AGENT_REGISTRY[id];
+    const firstLine = (def?.systemPrompt || '').split('\n')[0].replace(/^You are \w+Agent,?\s*/i, '').trim();
+    return `- ${id}: ${firstLine || 'generalist'}`;
+  }).join('\n');
+
+  const systemMsg = `You are a routing classifier. Pick the single best specialist for the user's request.
+Reply with ONLY the agent name — no explanation, no quotes, no other text.
+
+Agents:
+${catalog}`;
   try {
     const result = await complete(llmEndpoint, model, [
       { role: 'system', content: systemMsg },
@@ -306,5 +345,5 @@ Choose from: ${AGENT_IDS.join(', ')}.`;
   } catch (err) {
     if (!(err instanceof LLMUnavailableError)) console.warn('[router] LLM routing failed:', err.message);
   }
-  return routeByKeyword(prompt);
+  return 'AssistantAgent';
 }

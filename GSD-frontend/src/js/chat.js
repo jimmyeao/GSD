@@ -83,10 +83,10 @@ export class Chat {
   }
 
   /** Render a previously saved message (for loading conversation history). */
-  addRestoredMessage(role, content, agentId = null) {
+  addRestoredMessage(role, content, agentId = null, createdAt = null) {
     this._hideEmptyState();
     this.history.push({ role, content });
-    const el = this._createBubble(role, content, agentId);
+    const el = this._createBubble(role, content, agentId, createdAt);
     if (role === 'assistant') this._addOpenInEditorButtons(el.querySelector('.bubble-content'));
     this.container.appendChild(el);
     this._renderMermaid();
@@ -151,13 +151,34 @@ export class Chat {
     if (this._emptyState) this._emptyState.hidden = true;
   }
 
-  _createBubble(role, text, agentId = null) {
+  _formatTime(value, full = false) {
+    const d = value ? new Date(value.endsWith && value.endsWith('Z') ? value : (value + (typeof value === 'string' ? 'Z' : ''))) : new Date();
+    if (Number.isNaN(d.getTime())) return '';
+    if (full) return d.toLocaleString();
+    const now = new Date();
+    const sameDay = d.toDateString() === now.toDateString();
+    if (sameDay) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    const daysAgo = Math.floor((now - d) / oneDayMs);
+    if (daysAgo <= 6) return d.toLocaleDateString([], { weekday: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    return d.toLocaleDateString([], { day: 'numeric', month: 'short' }) + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+
+  _createBubble(role, text, agentId = null, createdAt = null) {
     const wrap = document.createElement('div');
     wrap.className = `msg msg-${role}`;
 
     const header = document.createElement('div');
     header.className = 'msg-header';
-    header.textContent = role === 'user' ? 'You' : (agentId || 'Assistant');
+    const who = document.createElement('span');
+    who.className = 'msg-who';
+    who.textContent = role === 'user' ? 'You' : (agentId || 'Assistant');
+    header.appendChild(who);
+    const time = document.createElement('span');
+    time.className = 'msg-time';
+    time.textContent = this._formatTime(createdAt);
+    time.title = this._formatTime(createdAt, true);
+    header.appendChild(time);
     wrap.appendChild(header);
 
     if (role === 'assistant') {

@@ -8,6 +8,14 @@ export const AGENTS = [
     isRouter: true,
   },
   {
+    id: 'MailAgent',
+    label: 'Mail',
+    description: 'Email + calendar assistant. Can read, draft, reply, schedule — mutations always ask you to approve.',
+    example: 'Reply to the latest email from Sarah confirming Thursday at 10am.',
+    icon: '✉',
+    model: 'General LLM',
+  },
+  {
     id: 'AlertAgent',
     label: 'Alert',
     description: 'Summarises alerts and suggests first-response actions.',

@@ -90,12 +90,127 @@ db.exec(`
 // Migration: add env_vars column if missing
 try { db.exec("ALTER TABLE projects ADD COLUMN env_vars TEXT DEFAULT '{}'"); } catch { /* already exists */ }
 
+// ── OAuth/identity migrations on users table (idempotent) ───────────
+try { db.exec("ALTER TABLE users ADD COLUMN email TEXT"); } catch { /* already exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN display_name TEXT"); } catch { /* already exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"); } catch { /* already exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN auth_provider TEXT"); } catch { /* already exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN provider_subject TEXT"); } catch { /* already exists */ }
+
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_provider ON users(auth_provider, provider_subject)"); } catch { /* ok */ }
+try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_email ON users(email)"); } catch { /* ok */ }
+
+// ── Mail accounts (Phase 2 — read-only mail + calendar) ─────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS mail_accounts (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider          TEXT    NOT NULL CHECK(provider IN ('microsoft','google')),
+    email             TEXT    NOT NULL,
+    display_name      TEXT,
+    access_token_enc  BLOB    NOT NULL,
+    refresh_token_enc BLOB,
+    expires_at        INTEGER,
+    scopes            TEXT,
+    provider_subject  TEXT,
+    status            TEXT    NOT NULL DEFAULT 'active' CHECK(status IN ('active','needs_reconnect','error')),
+    last_error        TEXT,
+    created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, provider, email)
+  );
+  CREATE INDEX IF NOT EXISTS idx_mail_accounts_user ON mail_accounts(user_id);
+`);
+
+// ── Mail action approvals (Phase 3 — write operations require approval) ─
+db.exec(`
+  CREATE TABLE IF NOT EXISTS mail_action_approvals (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    account_id      INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    action_type     TEXT    NOT NULL,
+    payload         TEXT    NOT NULL,
+    preview         TEXT,
+    status          TEXT    NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','executed','expired','failed')),
+    result          TEXT,
+    error           TEXT,
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    resolved_at     TEXT,
+    expires_at      TEXT    NOT NULL DEFAULT (datetime('now','+15 minutes'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_mail_approvals_user ON mail_action_approvals(user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_mail_approvals_conv ON mail_action_approvals(conversation_id);
+`);
+
+// ── Allowed-emails allowlist ────────────────────────────────────────
+db.exec(`
+  CREATE TABLE IF NOT EXISTS allowed_emails (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    email      TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    role       TEXT    NOT NULL DEFAULT 'user' CHECK(role IN ('user','admin')),
+    is_domain  INTEGER NOT NULL DEFAULT 0 CHECK(is_domain IN (0,1)),
+    added_by   INTEGER REFERENCES users(id),
+    note       TEXT,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
 // Prepared statements
 const stmts = {
   // Users
   insertUser: db.prepare('INSERT INTO users (username, password) VALUES (?, ?)'),
   getUserByUsername: db.prepare('SELECT * FROM users WHERE username = ?'),
-  getUserById: db.prepare('SELECT id, username, created_at FROM users WHERE id = ?'),
+  getUserById: db.prepare('SELECT id, username, email, display_name, role, auth_provider, created_at FROM users WHERE id = ?'),
+
+  // OAuth / identity
+  getUserByProvider: db.prepare(
+    'SELECT * FROM users WHERE auth_provider = ? AND provider_subject = ?'
+  ),
+  getUserByEmail: db.prepare('SELECT * FROM users WHERE email = ? COLLATE NOCASE'),
+  // password column is NOT NULL — pass '' for OAuth users; username gets the email
+  insertOAuthUser: db.prepare(
+    `INSERT INTO users (username, password, email, display_name, role, auth_provider, provider_subject)
+     VALUES (?, '', ?, ?, ?, ?, ?)`
+  ),
+  updateUserProvider: db.prepare(
+    `UPDATE users
+        SET auth_provider    = ?,
+            provider_subject = ?,
+            display_name     = COALESCE(?, display_name)
+      WHERE id = ?`
+  ),
+  updateUserRole: db.prepare('UPDATE users SET role = ? WHERE id = ?'),
+  updateUserEmail: db.prepare('UPDATE users SET email = ? WHERE id = ?'),
+  listUsers: db.prepare(
+    `SELECT id, username, email, display_name, role, auth_provider, created_at
+       FROM users
+       ORDER BY created_at DESC`
+  ),
+
+  // Allowed emails / allowlist
+  findAllowedExact: db.prepare(
+    "SELECT * FROM allowed_emails WHERE email = ? COLLATE NOCASE AND is_domain = 0"
+  ),
+  findAllowedDomainAll: db.prepare(
+    'SELECT * FROM allowed_emails WHERE is_domain = 1'
+  ),
+  listAllowedEmails: db.prepare(
+    `SELECT a.id, a.email, a.role, a.is_domain, a.note, a.created_at,
+            u.username AS added_by_username
+       FROM allowed_emails a
+       LEFT JOIN users u ON u.id = a.added_by
+      ORDER BY a.created_at DESC`
+  ),
+  getAllowedById: db.prepare('SELECT * FROM allowed_emails WHERE id = ?'),
+  insertAllowedEmail: db.prepare(
+    'INSERT INTO allowed_emails (email, role, is_domain, added_by, note) VALUES (?, ?, ?, ?, ?)'
+  ),
+  deleteAllowedEmail: db.prepare('DELETE FROM allowed_emails WHERE id = ?'),
+  countAllowedEmails: db.prepare('SELECT COUNT(*) AS count FROM allowed_emails'),
+  countAllowedAdmins: db.prepare(
+    "SELECT COUNT(*) AS count FROM allowed_emails WHERE role = 'admin'"
+  ),
 
   // Conversations
   listConversations: db.prepare(
@@ -136,6 +251,91 @@ const stmts = {
   getProjectEnv: db.prepare('SELECT env_vars FROM projects WHERE id = ? AND user_id = ?'),
   updateProjectEnv: db.prepare('UPDATE projects SET env_vars = ? WHERE id = ? AND user_id = ?'),
 
+  // Mail accounts — NEVER expose token blobs in list responses
+  listMailAccounts: db.prepare(
+    `SELECT id, provider, email, display_name, status, created_at
+       FROM mail_accounts
+      WHERE user_id = ?
+      ORDER BY created_at DESC`
+  ),
+  getMailAccount: db.prepare(
+    'SELECT * FROM mail_accounts WHERE id = ? AND user_id = ?'
+  ),
+  getMailAccountByIdRaw: db.prepare(
+    'SELECT * FROM mail_accounts WHERE id = ?'
+  ),
+  insertMailAccount: db.prepare(
+    `INSERT INTO mail_accounts
+       (user_id, provider, email, display_name, access_token_enc, refresh_token_enc,
+        expires_at, scopes, provider_subject)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ),
+  updateMailAccountTokens: db.prepare(
+    `UPDATE mail_accounts
+        SET access_token_enc  = ?,
+            refresh_token_enc = ?,
+            expires_at        = ?,
+            status            = 'active',
+            last_error        = NULL,
+            updated_at        = datetime('now')
+      WHERE id = ?`
+  ),
+  updateMailAccountStatus: db.prepare(
+    `UPDATE mail_accounts
+        SET status     = ?,
+            last_error = ?,
+            updated_at = datetime('now')
+      WHERE id = ?`
+  ),
+  deleteMailAccount: db.prepare(
+    'DELETE FROM mail_accounts WHERE id = ? AND user_id = ?'
+  ),
+  findMailAccountByEmail: db.prepare(
+    'SELECT * FROM mail_accounts WHERE user_id = ? AND provider = ? AND email = ?'
+  ),
+
+  // Mail action approvals (Phase 3)
+  insertApproval: db.prepare(
+    `INSERT INTO mail_action_approvals
+       (user_id, account_id, conversation_id, action_type, payload, preview)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ),
+  getApproval: db.prepare(
+    'SELECT * FROM mail_action_approvals WHERE id = ? AND user_id = ?'
+  ),
+  listPendingApprovals: db.prepare(
+    `SELECT id, account_id, conversation_id, action_type, payload, preview,
+            status, created_at, expires_at
+       FROM mail_action_approvals
+      WHERE user_id = ? AND status = 'pending'
+      ORDER BY created_at DESC`
+  ),
+  countPendingApprovalsByUser: db.prepare(
+    "SELECT COUNT(*) AS count FROM mail_action_approvals WHERE user_id = ? AND status = 'pending'"
+  ),
+  updateApprovalStatus: db.prepare(
+    `UPDATE mail_action_approvals
+        SET status      = ?,
+            result      = ?,
+            error       = ?,
+            resolved_at = datetime('now')
+      WHERE id = ?`
+  ),
+  expireStaleApprovals: db.prepare(
+    "UPDATE mail_action_approvals SET status = 'expired', resolved_at = datetime('now') WHERE status = 'pending' AND expires_at < datetime('now')"
+  ),
+  // Executed/failed approvals for a conversation, newest first — used by the
+  // MailAgent continuation path so the model sees REAL message IDs it acted
+  // on and doesn't hallucinate fake ones.
+  listResolvedApprovalsByConv: db.prepare(
+    `SELECT id, account_id, action_type, payload, preview, status, resolved_at
+       FROM mail_action_approvals
+      WHERE conversation_id = ? AND user_id = ?
+        AND status IN ('executed','rejected','failed')
+      ORDER BY resolved_at DESC
+      LIMIT 30`
+  ),
+
   // Containers
   insertContainer: db.prepare('INSERT INTO containers (project_id, user_id, image) VALUES (?, ?, ?)'),
   getContainer: db.prepare('SELECT * FROM containers WHERE id = ? AND user_id = ?'),
@@ -145,5 +345,32 @@ const stmts = {
   countUserContainers: db.prepare('SELECT COUNT(*) as count FROM containers WHERE user_id = ? AND status IN (\'created\',\'running\')'),
   cleanStaleContainers: db.prepare('DELETE FROM containers WHERE user_id = ? AND docker_id IS NULL'),
 };
+
+// ── Bootstrap: seed admin allowlist entry on first boot ─────────────
+try {
+  const row = stmts.countAllowedEmails.get();
+  if (row && row.count === 0 && process.env.BOOTSTRAP_ADMIN_EMAIL) {
+    stmts.insertAllowedEmail.run(
+      process.env.BOOTSTRAP_ADMIN_EMAIL,
+      'admin',
+      0,
+      null,
+      'bootstrap',
+    );
+    console.log(`[auth] bootstrapped admin allowlist: ${process.env.BOOTSTRAP_ADMIN_EMAIL}`);
+  }
+} catch (err) {
+  console.warn('[auth] bootstrap admin allowlist failed:', err.message);
+}
+
+/** Convenience: run the expiry sweep and return rows changed. */
+export function expireStaleApprovals() {
+  try {
+    const info = stmts.expireStaleApprovals.run();
+    return info?.changes ?? 0;
+  } catch {
+    return 0;
+  }
+}
 
 export { db, stmts };

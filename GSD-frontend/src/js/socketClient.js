@@ -1,6 +1,9 @@
 /**
  * Socket.IO client wrapper for GSD backend.
  *
+ * Uses same-origin cookie auth — the session cookie (gsd_session) is sent
+ * automatically with the handshake when withCredentials is true.
+ *
  * Expected backend events:
  *   Emit   → 'message'  { agent: string, content: string, history?: array }
  *   Listen ← 'token'    { token: string }           (streaming chunk)
@@ -10,9 +13,12 @@
  */
 
 export class SocketClient {
-  constructor(url, token) {
-    this.url = url;
-    this.token = token;
+  /**
+   * @param {string} [url] — optional explicit URL; if omitted, socket.io-client
+   *   defaults to the current origin (which is what we want behind NGINX).
+   */
+  constructor(url) {
+    this.url = url || '';
     this.socket = null;
     this.connected = false;
     this._handlers = {};
@@ -21,13 +27,16 @@ export class SocketClient {
   connect() {
     if (this.socket) this.disconnect();
 
-    // io() is loaded via Socket.IO CDN in index.html
-    this.socket = io(this.url, {
+    // io() is loaded via Socket.IO CDN in index.html. When url is falsy,
+    // socket.io-client connects to the current origin on the default path.
+    const opts = {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 5,
       reconnectionDelay: 2000,
-      auth: { token: this.token },
-    });
+      withCredentials: true,
+      path: '/socket.io',
+    };
+    this.socket = this.url ? io(this.url, opts) : io(opts);
 
     this.socket.on('connect', () => {
       this.connected = true;
@@ -76,6 +85,34 @@ export class SocketClient {
     this.socket.on('container:output', (data) => {
       this._emit('containerOutput', data);
     });
+
+    // ── Mail approval flow (MailAgent) ─────────────────────────────────
+    this.socket.on('mail:approval_needed', (data) => {
+      this._emit('mailApprovalNeeded', data);
+    });
+
+    this.socket.on('mail:approval_resolved', (data) => {
+      this._emit('mailApprovalResolved', data);
+    });
+
+    this.socket.on('mail:approval_error', (data) => {
+      this._emit('mailApprovalError', data);
+    });
+
+    this.socket.on('mail:continuation_start', (data) => {
+      this._emit('mailContinuationStart', data);
+    });
+  }
+
+  /** Send the user's approve/reject decision back to the backend. */
+  sendMailApprovalResponse(approvalId, decision) {
+    if (!this.socket || !this.connected) {
+      throw new Error('Not connected to backend.');
+    }
+    if (decision !== 'approve' && decision !== 'reject') {
+      throw new Error(`Invalid decision: ${decision}`);
+    }
+    this.socket.emit('mail:approval_response', { approvalId, decision });
   }
 
   disconnect() {
