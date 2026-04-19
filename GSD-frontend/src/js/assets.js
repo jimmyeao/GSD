@@ -1,22 +1,14 @@
 /**
- * REST client for the per-user assets API.
+ * REST client for the per-user assets API. Same-origin cookie auth.
  */
 
-function authHeaders(token) {
-  return { 'Authorization': `Bearer ${token}` };
+import { fetchJson } from './auth.js';
+
+export async function fetchAssets() {
+  const data = await fetchJson('/api/assets');
+  return (data && data.assets) || [];
 }
 
-export async function fetchAssets(baseUrl, token) {
-  const res = await fetch(`${baseUrl}/assets`, { headers: authHeaders(token) });
-  if (!res.ok) throw new Error('Failed to load assets');
-  const data = await res.json();
-  return data.assets;
-}
-
-export async function deleteAsset(baseUrl, token, id) {
-  const res = await fetch(`${baseUrl}/assets/${id}`, {
-    method: 'DELETE',
-    headers: authHeaders(token),
-  });
-  if (!res.ok) throw new Error('Failed to delete asset');
+export async function deleteAsset(id) {
+  await fetchJson(`/api/assets/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

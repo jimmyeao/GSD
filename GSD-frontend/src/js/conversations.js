@@ -1,58 +1,35 @@
 /**
- * REST client for conversation CRUD.
+ * REST client for conversation CRUD. Uses same-origin cookie auth via fetchJson.
  */
 
-function authHeaders(token) {
-  return {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`,
-  };
+import { fetchJson } from './auth.js';
+
+export async function fetchConversations() {
+  const data = await fetchJson('/api/conversations');
+  return (data && data.conversations) || [];
 }
 
-export async function fetchConversations(baseUrl, token) {
-  const res = await fetch(`${baseUrl}/conversations`, {
-    headers: authHeaders(token),
-  });
-  if (!res.ok) throw new Error('Failed to load conversations');
-  const data = await res.json();
-  return data.conversations;
-}
-
-export async function createConversation(baseUrl, token, title, agentId) {
-  const res = await fetch(`${baseUrl}/conversations`, {
+export async function createConversation(title, agentId) {
+  const data = await fetchJson('/api/conversations', {
     method: 'POST',
-    headers: authHeaders(token),
-    body: JSON.stringify({ title, agent_id: agentId }),
+    body: { title, agent_id: agentId },
   });
-  if (!res.ok) throw new Error('Failed to create conversation');
-  const data = await res.json();
-  return data.conversation;
+  return data && data.conversation;
 }
 
-export async function fetchMessages(baseUrl, token, convId) {
-  const res = await fetch(`${baseUrl}/conversations/${convId}/messages`, {
-    headers: authHeaders(token),
-  });
-  if (!res.ok) throw new Error('Failed to load messages');
-  const data = await res.json();
-  return data.messages;
+export async function fetchMessages(convId) {
+  const data = await fetchJson(`/api/conversations/${encodeURIComponent(convId)}/messages`);
+  return (data && data.messages) || [];
 }
 
-export async function deleteConversation(baseUrl, token, convId) {
-  const res = await fetch(`${baseUrl}/conversations/${convId}`, {
-    method: 'DELETE',
-    headers: authHeaders(token),
-  });
-  if (!res.ok) throw new Error('Failed to delete conversation');
+export async function deleteConversation(convId) {
+  await fetchJson(`/api/conversations/${encodeURIComponent(convId)}`, { method: 'DELETE' });
 }
 
-export async function renameConversation(baseUrl, token, convId, title) {
-  const res = await fetch(`${baseUrl}/conversations/${convId}`, {
+export async function renameConversation(convId, title) {
+  const data = await fetchJson(`/api/conversations/${encodeURIComponent(convId)}`, {
     method: 'PATCH',
-    headers: authHeaders(token),
-    body: JSON.stringify({ title }),
+    body: { title },
   });
-  if (!res.ok) throw new Error('Failed to rename conversation');
-  const data = await res.json();
-  return data.conversation;
+  return data && data.conversation;
 }

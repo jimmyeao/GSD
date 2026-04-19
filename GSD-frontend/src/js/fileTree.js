@@ -2,6 +2,8 @@
  * File tree component — fetches and renders a workspace file tree.
  */
 
+import { fetchJson } from './auth.js';
+
 const FILE_ICONS = {
   js: 'JS', ts: 'TS', py: 'Py', json: '{}', html: '<>', css: '#',
   md: 'M', sh: '$', sql: 'Q', go: 'Go', rs: 'Rs', java: 'Jv',
@@ -15,13 +17,9 @@ function iconForFile(name) {
 export class FileTree {
   /**
    * @param {HTMLElement} containerEl - div to render tree into
-   * @param {string} backendUrl - base URL for API calls
-   * @param {string} token - auth token
    */
-  constructor(containerEl, backendUrl, token) {
+  constructor(containerEl) {
     this._root = containerEl;
-    this._url = backendUrl;
-    this._token = token;
     this._projectId = null;
     this._onSelect = null;
     this._onCreateFile = null;
@@ -33,12 +31,8 @@ export class FileTree {
   async load(projectId) {
     this._projectId = projectId;
     try {
-      const res = await fetch(`${this._url}/workspace/${projectId}/tree`, {
-        headers: { 'Authorization': `Bearer ${this._token}` },
-      });
-      if (!res.ok) throw new Error(`Tree fetch failed: ${res.status}`);
-      const data = await res.json();
-      this._render(data.tree || data || []);
+      const data = await fetchJson(`/api/workspace/${encodeURIComponent(projectId)}/tree`);
+      this._render((data && (data.tree || data)) || []);
     } catch (err) {
       this._root.innerHTML = `<div class="tree-error">${err.message}</div>`;
     }

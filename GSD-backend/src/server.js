@@ -1,8 +1,8 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import { createServer as createHttpServer } from 'node:http';
-import { createServer as createHttpsServer } from 'node:https';
 import { Server } from 'socket.io';
 import { config } from './config.js';
 import { getAgent } from './agents/registry.js';
@@ -13,36 +13,35 @@ import { ensureComfyRunning, freeComfyMemory } from './comfyManager.js';
 import { routeByKeyword, routeWithLLM } from './router.js';
 import { buildPptx, parseSlideResponse } from './agents/slideBuilder.js';
 import { resolveVisuals } from './orchestrator.js';
-import { stmts } from './db.js';
-import { socketAuth } from './auth.js';
+import { stmts, expireStaleApprovals } from './db.js';
+import { runMailAgent, executeApprovedAction, summariseExecution, isCompoundRequest } from './agents/mailAgent.js';
+import { socketAuth, csrfProtect } from './auth.js';
 import authRoutes from './routes/auth.js';
 import convRoutes from './routes/conversations.js';
 import assetsRoutes from './routes/assets.js';
 import workspaceRoutes from './routes/workspace.js';
 import sandboxRoutes from './routes/sandbox.js';
 import previewRoutes from './routes/preview.js';
+import adminRoutes from './routes/admin.js';
+import mailRoutes from './routes/mail.js';
+import { isTokenKeyValid } from './mail/tokens.js';
 import { mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
 
 const app = express();
-// Use HTTPS if cert files exist, otherwise HTTP
-let httpServer;
-try {
-  const { readFileSync } = await import('node:fs');
-  const { dirname, join } = await import('node:path');
-  const { fileURLToPath } = await import('node:url');
-  const __dir = dirname(fileURLToPath(import.meta.url));
-  const certPath = join(__dir, '..', 'cert.pem');
-  const keyPath = join(__dir, '..', 'key.pem');
-  readFileSync(certPath); // test existence
-  httpServer = createHttpsServer({ cert: readFileSync(certPath), key: readFileSync(keyPath) }, app);
-  console.log('[server] HTTPS enabled');
-} catch {
-  httpServer = createHttpServer(app);
-  console.log('[server] HTTP mode (no cert.pem/key.pem found)');
-}
+// Backend runs behind NGINX which terminates TLS; always bind plain HTTP.
+app.set('trust proxy', 'loopback');
+const httpServer = createHttpServer(app);
+
+// CORS config shared by Express and Socket.IO — origin-locked for credentials.
+const corsOrigin = config.publicUrl || config.cors.origin || true;
+const corsConfig = {
+  origin: corsOrigin,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  credentials: true,
+};
 
 const io = new Server(httpServer, {
-  cors: config.cors,
+  cors: corsConfig,
   // Qwen3 thinking phase can be silent for minutes — keep socket alive
   pingTimeout: 600_000,
   pingInterval: 25_000,
@@ -51,19 +50,26 @@ const io = new Server(httpServer, {
 });
 
 // ── Middleware ──────────────────────────────────────────────────────
-app.use(cors(config.cors));
-app.use(express.json());
+// cookieParser must run before csrfProtect / routes that read cookies.
+// The secret enables signed cookies (used for the OAuth state cookie).
+app.use(cookieParser(config.sessionSecret || config.jwtSecret || 'gsd-unsigned'));
+app.use(cors(corsConfig));
+app.use(express.json({ limit: '10mb' }));
+// Double-submit-cookie CSRF — checked on mutating requests only.
+app.use(csrfProtect);
 
 // ── Routes ─────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', agents: Object.keys(config.models), demoMode: config.demoMode });
 });
 app.use('/auth', authRoutes);
+app.use('/admin', adminRoutes);
 app.use('/conversations', convRoutes);
 app.use('/assets', assetsRoutes);
 app.use('/workspace', workspaceRoutes);
 app.use('/sandbox', sandboxRoutes);
 app.use('/preview', previewRoutes);
+app.use('/mail', mailRoutes);
 
 // ── Text-to-speech via Piper ──────────────────────────────────────
 app.post('/tts', express.json(), async (req, res) => {
@@ -226,6 +232,12 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // ── MailAgent → tool-calling + approval flow ───────────────────
+    if (agentId === 'MailAgent') {
+      await runMailAgent({ socket, user: socket.user, content, history, convId });
+      return;
+    }
+
     // ── LLM streaming ─────────────────────────────────────────────
     const modelCfg = config.models[agentDef.model];
     const messages = buildMessages(agentDef.systemPrompt, history, content);
@@ -288,6 +300,96 @@ io.on('connection', (socket) => {
       socket.emit('optimised', { positive: result.positive, negative: result.negative ?? '' });
     } catch (err) {
       socket.emit('error', { message: `Prompt optimisation failed: ${err.message}` });
+    }
+  });
+
+  // ── Mail approval response (approve/reject a pending mutation) ──
+  socket.on('mail:approval_response', async ({ approvalId, decision }) => {
+    try {
+      if (!Number.isFinite(Number(approvalId))) {
+        socket.emit('mail:approval_error', { approvalId, error: 'invalid approvalId' });
+        return;
+      }
+      if (decision !== 'approve' && decision !== 'reject') {
+        socket.emit('mail:approval_error', { approvalId, error: 'invalid decision' });
+        return;
+      }
+      // Sweep expired rows first so a stale approval is caught cleanly.
+      expireStaleApprovals();
+
+      const approval = stmts.getApproval.get(Number(approvalId), socket.user.id);
+      if (!approval) {
+        socket.emit('mail:approval_error', { approvalId, error: 'not_found' });
+        return;
+      }
+      if (approval.status !== 'pending') {
+        socket.emit('mail:approval_error', { approvalId, error: `already_${approval.status}` });
+        return;
+      }
+      // Expiry check (race with the periodic sweeper).
+      const now = new Date();
+      const expires = new Date(approval.expires_at.replace(' ', 'T') + 'Z');
+      if (!isNaN(expires.getTime()) && expires < now) {
+        stmts.updateApprovalStatus.run('expired', null, 'expired', approval.id);
+        socket.emit('mail:approval_error', { approvalId, error: 'expired' });
+        return;
+      }
+
+      const convId = approval.conversation_id;
+
+      if (decision === 'reject') {
+        stmts.updateApprovalStatus.run('rejected', null, null, approval.id);
+        socket.emit('mail:approval_resolved', { approvalId, status: 'rejected' });
+
+        const msg = `Action rejected — nothing was sent or changed.`;
+        // Stream chunks so it renders inline in the chat.
+        for (let i = 0; i < msg.length; i += 4) {
+          socket.emit('token', { token: msg.slice(i, i + 4) });
+        }
+        if (convId) {
+          stmts.insertMessage.run(convId, 'assistant', 'MailAgent', msg);
+          stmts.touchConversation.run(convId);
+        }
+        socket.emit('done', { agent: 'MailAgent' });
+        return;
+      }
+
+      // decision === 'approve'
+      const { ok, result, error } = await executeApprovedAction(socket.user, approval);
+      if (ok) {
+        stmts.updateApprovalStatus.run('executed', JSON.stringify(result ?? {}), null, approval.id);
+        socket.emit('mail:approval_resolved', { approvalId, status: 'executed', result });
+        const summary = summariseExecution(approval, result);
+        for (let i = 0; i < summary.length; i += 4) {
+          socket.emit('token', { token: summary.slice(i, i + 4) });
+        }
+        if (convId) {
+          stmts.insertMessage.run(convId, 'assistant', 'MailAgent', summary);
+          stmts.touchConversation.run(convId);
+        }
+        socket.emit('done', { agent: 'MailAgent' });
+        // Auto-continue MailAgent for compound asks once all approvals in this
+        // conversation have resolved (e.g. "unsubscribe then trash" — after the
+        // last unsub resolves, re-invoke so the agent can emit trash calls).
+        maybeAutoContinueMailAgent(socket, convId, summary).catch(err => {
+          console.error('[mail:auto-continue] error:', err?.message || err);
+        });
+      } else {
+        stmts.updateApprovalStatus.run('failed', null, String(error || 'failed'), approval.id);
+        socket.emit('mail:approval_resolved', { approvalId, status: 'failed', error: String(error || 'failed') });
+        const msg = `Action failed: ${error || 'unknown error'}.`;
+        for (let i = 0; i < msg.length; i += 4) {
+          socket.emit('token', { token: msg.slice(i, i + 4) });
+        }
+        if (convId) {
+          stmts.insertMessage.run(convId, 'assistant', 'MailAgent', msg);
+          stmts.touchConversation.run(convId);
+        }
+        socket.emit('done', { agent: 'MailAgent' });
+      }
+    } catch (err) {
+      console.error('[mail:approval_response] error:', err?.message || err);
+      socket.emit('mail:approval_error', { approvalId, error: err?.message || 'failed' });
     }
   });
 
@@ -627,11 +729,10 @@ function saveAsset(userId, convId, type, filename, buffer, title) {
   return result.lastInsertRowid;
 }
 
-function assetUrl(socket, assetId) {
-  const scheme = socket.handshake.secure ? 'https' : 'http';
-  const host = socket.handshake.headers.host || `localhost:${config.port}`;
-  const token = socket.handshake.auth?.token || '';
-  return `${scheme}://${host}/assets/${assetId}/file?token=${encodeURIComponent(token)}`;
+function assetUrl(_socket, assetId) {
+  // Behind NGINX: browser calls /api/assets/... with the session cookie attached.
+  // Use a relative URL so the frontend's origin is always preserved.
+  return `/api/assets/${assetId}/file`;
 }
 
 async function handleImageAgent(socket, prompt, convId, agentId) {
@@ -652,10 +753,8 @@ async function handleImageAgent(socket, prompt, convId, agentId) {
       const assetId = saveAsset(socket.user.id, convId, 'image', imgData.filename, buffer, prompt.slice(0, 80));
       imgUrl = assetUrl(socket, assetId);
     } catch {
-      // Fallback to proxy URL if caching fails
-      const scheme = socket.handshake.secure ? 'https' : 'http';
-      const host = socket.handshake.headers.host || `localhost:${config.port}`;
-      imgUrl = `${scheme}://${host}/comfy-image?filename=${encodeURIComponent(imgData.filename)}&subfolder=${encodeURIComponent(imgData.subfolder)}&type=${encodeURIComponent(imgData.type)}`;
+      // Fallback to proxy URL if caching fails — relative path served via NGINX.
+      imgUrl = `/api/comfy-image?filename=${encodeURIComponent(imgData.filename)}&subfolder=${encodeURIComponent(imgData.subfolder)}&type=${encodeURIComponent(imgData.type)}`;
     }
 
     freeComfyMemory();
@@ -740,10 +839,8 @@ async function handleVideoAgent(socket, prompt, convId, imageData) {
       videoUrl = assetUrl(socket, assetId);
       try { unlinkSync(cachedPath); } catch { /* ignore */ }
     } catch {
-      // Fallback to old flat URL
-      const scheme = socket.handshake.secure ? 'https' : 'http';
-      const host = socket.handshake.headers.host || `localhost:${config.port}`;
-      videoUrl = `${scheme}://${host}/videos/${encodeURIComponent(vidData.filename)}`;
+      // Fallback to flat URL — relative path served via NGINX.
+      videoUrl = `/api/videos/${encodeURIComponent(vidData.filename)}`;
     }
 
     freeComfyMemory();
@@ -827,9 +924,8 @@ async function handleSlideAgent(socket, prompt, history, convId) {
       downloadUrl = assetUrl(socket, assetId);
       try { unlinkSync(slidesPath); } catch { /* ignore */ }
     } catch {
-      const scheme = socket.handshake.secure ? 'https' : 'http';
-      const host = socket.handshake.headers.host || `localhost:${config.port}`;
-      downloadUrl = `${scheme}://${host}/slides/${filename}`;
+      // Fallback — relative path served via NGINX.
+      downloadUrl = `/api/slides/${filename}`;
     }
 
     // Stream a summary to the user
@@ -916,11 +1012,124 @@ for (const id of ['AlertAgent','AnalystAgent','ClientBriefAgent','DemoAgent','De
   }
 }
 
+// ── Mail token key validation ───────────────────────────────────────
+// Fail closed: if any mail OAuth client is configured but MAIL_TOKEN_KEY is
+// missing or invalid, refuse to start. Encrypting tokens with an ephemeral
+// (random) key would silently break refresh after every restart.
+{
+  const mailExpected = !!config.oauth.microsoft.clientId || !!config.oauth.google.clientId;
+  const keyValid = isTokenKeyValid();
+  if (mailExpected && !keyValid) {
+    console.error('[FATAL] MAIL_TOKEN_KEY is missing or invalid but a mail OAuth provider is configured.');
+    console.error('        Generate one:   openssl rand -base64 32');
+    console.error('        Then add to .env as  MAIL_TOKEN_KEY=<value>  and restart.');
+    process.exit(1);
+  }
+  console.log(`Mail OAuth: MS=${!!config.oauth.microsoft.clientId}, Google=${!!config.oauth.google.clientId}, tokenKey=${keyValid ? 'OK' : 'MISSING'}`);
+}
+
+// ── Mail continuation state ─────────────────────────────────────────
+// Tracks how many times we've auto-re-invoked MailAgent for a conversation
+// after an approval resolved. Capped per-conv to prevent runaway loops.
+const _mailContinuationDepth = new Map(); // convId → count
+const MAX_MAIL_CONTINUATION_DEPTH = 3;
+
+async function maybeAutoContinueMailAgent(socket, convId, lastSummary) {
+  if (!convId) return;
+  // If another approval for this conversation is still pending, the agent
+  // isn't ready to move to the next phase yet — wait for those to resolve.
+  const remaining = stmts.listPendingApprovals.all(socket.user.id)
+    .filter(a => a.conversation_id === convId).length;
+  if (remaining > 0) return;
+
+  // Original request must be a compound ask, else nothing to continue.
+  const msgs = stmts.listMessages.all(convId);
+  const lastUser = [...msgs].reverse().find(m => m.role === 'user');
+  if (!lastUser || !isCompoundRequest(lastUser.content)) return;
+
+  const depth = _mailContinuationDepth.get(convId) || 0;
+  if (depth >= MAX_MAIL_CONTINUATION_DEPTH) return;
+  _mailContinuationDepth.set(convId, depth + 1);
+
+  // Fetch the REAL executed actions for this conversation so the continuation
+  // sees concrete message IDs to operate on. Without this, the model will
+  // hallucinate IDs (they aren't carried in the assistant-message history).
+  const resolved = stmts.listResolvedApprovalsByConv.all(convId, socket.user.id);
+  const resolvedSummary = _formatResolvedForContinuation(resolved);
+
+  socket.emit('mail:continuation_start', { conversationId: convId });
+
+  // Pruned history: always include the original (first) user message so the
+  // agent can see the full compound ask, plus the most recent context. If we
+  // just sliced the tail, 20+ per-approval summaries would push the original
+  // user request out of the window — and the continuation would have no idea
+  // what phase 2 is.
+  const firstUser = msgs.find(m => m.role === 'user');
+  const tail = msgs.slice(-10);
+  const seen = new Set();
+  const history = [firstUser, ...tail]
+    .filter(m => m && !seen.has(m.id) && seen.add(m.id))
+    .map(m => ({ role: m.role, content: m.content }));
+
+  const originalRequest = firstUser?.content || lastUser.content;
+
+  try {
+    await runMailAgent({
+      socket,
+      user: socket.user,
+      content: '(continue — execute the next phase of the original request using the ids listed in the continuation block)',
+      history,
+      convId,
+      continuation: `ORIGINAL USER REQUEST: """${originalRequest}"""
+
+ACTIONS ALREADY EXECUTED in this conversation (use these EXACT ids when targeting the same items — NEVER invent ids):
+${resolvedSummary || '(none)'}
+
+Now pick up where you left off. If the original request was compound ("unsubscribe from X then trash them", "reply to A and forward to B"), the earlier phase is done — emit plan_mutations NOW for the next phase, targeting the SAME items by their exact message_id / account_id from the list above. If the original request is fully complete, say so in one short sentence and stop. Do not re-emit actions that are already in the executed list.`,
+    });
+  } finally {
+    // Reset depth once no further continuations fire — we cap runaway loops
+    // but we don't want a stale counter blocking future compound asks.
+    setTimeout(() => {
+      const d = _mailContinuationDepth.get(convId) || 0;
+      if (d <= depth + 1) _mailContinuationDepth.delete(convId);
+    }, 60_000);
+  }
+}
+
+function _formatResolvedForContinuation(rows) {
+  if (!Array.isArray(rows) || !rows.length) return '';
+  const lines = [];
+  for (const r of rows) {
+    if (r.status !== 'executed') continue;
+    let p = {};
+    try { p = JSON.parse(r.payload); } catch { /* ignore */ }
+    const bits = [`action=${r.action_type}`, `account_id=${r.account_id}`];
+    if (p.message_id) bits.push(`message_id="${p.message_id}"`);
+    if (p.event_id) bits.push(`event_id="${p.event_id}"`);
+    if (p.subject) bits.push(`subject=${JSON.stringify(p.subject)}`);
+    if (p.sender?.email) bits.push(`from=${p.sender.email}`);
+    lines.push(`- ${bits.join(', ')}`);
+  }
+  return lines.join('\n');
+}
+
+// ── Mail approval expiry sweeper ────────────────────────────────────
+// Runs once on boot and every 5 minutes to retire stale pending approvals.
+try { expireStaleApprovals(); } catch { /* ignore */ }
+const _approvalSweeper = setInterval(() => {
+  try { expireStaleApprovals(); } catch { /* ignore */ }
+}, 5 * 60 * 1000);
+if (typeof _approvalSweeper.unref === 'function') _approvalSweeper.unref();
+
 // ── Start ────────────────────────────────────────────────────────────
-httpServer.listen(config.port, () => {
-  const proto = httpServer.cert ? 'https' : 'http';
-  console.log(`GSD backend listening on ${proto}://localhost:${config.port}`);
-  console.log(`Demo mode: ${config.demoMode ? 'ON' : 'OFF'}`);
+// Default bind is loopback; set HOST=0.0.0.0 (or a specific IP) when NGINX
+// runs on a separate host and needs to reach the backend over the network.
+const bindHost = process.env.HOST || '127.0.0.1';
+httpServer.listen(config.port, bindHost, () => {
+  console.log(`GSD backend listening on http://${bindHost}:${config.port}`);
+  console.log(`Public URL:  ${config.publicUrl}`);
+  console.log(`Demo mode:   ${config.demoMode ? 'ON' : 'OFF'}`);
   console.log(`General LLM: ${config.models.general.endpoint}`);
   console.log(`Coder LLM:   ${config.models.coder.endpoint}`);
   console.log(`ComfyUI:     ${config.models.comfyui.endpoint}`);

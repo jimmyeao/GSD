@@ -151,6 +151,12 @@ warnings, and anomalies. Identify patterns, likely root causes, and affected
 components. Summarise findings in a structured report with severity levels.`,
   },
 
+  MailAgent: {
+    model: 'mail',
+    // Actual behaviour lives in src/agents/mailAgent.js (runMailAgent).
+    systemPrompt: null,
+  },
+
   ProposalAgent: {
     model: 'coder',
     systemPrompt: `You are ProposalAgent. Draft professional client-ready IT proposals.

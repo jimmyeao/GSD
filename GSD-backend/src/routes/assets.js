@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { stmts } from '../db.js';
-import { expressAuth, verifyToken } from '../auth.js';
+import { expressAuth, verifyToken, COOKIES } from '../auth.js';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, unlinkSync } from 'node:fs';
@@ -16,26 +16,29 @@ const MIME_TYPES = {
 
 const router = Router();
 
-// List assets (requires auth header)
+// List assets (requires auth cookie)
 router.get('/', expressAuth, (req, res) => {
   const rows = stmts.listAssets.all(req.user.id);
   res.json({ assets: rows });
 });
 
-// Serve an asset file (supports Bearer header OR ?token= query param for downloads)
+// Serve an asset file. Accepts either the session cookie (preferred)
+// or a ?token= query param (legacy, for direct-download anchor tags).
 router.get('/:id/file', (req, res) => {
-  // Try auth header first, then query param
-  let user = null;
-  const header = req.headers.authorization;
-  if (header?.startsWith('Bearer ')) {
-    try { const p = verifyToken(header.slice(7)); user = { id: p.sub, username: p.username }; } catch {}
-  }
-  if (!user && req.query.token) {
-    try { const p = verifyToken(req.query.token); user = { id: p.sub, username: p.username }; } catch {}
-  }
-  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  let userId = null;
 
-  const asset = stmts.getAsset.get(req.params.id, user.id);
+  // Preferred: session cookie
+  const cookieToken = req.cookies?.[COOKIES.session];
+  if (cookieToken) {
+    try { const p = verifyToken(cookieToken); userId = p.sub; } catch { /* fallthrough */ }
+  }
+  // Legacy: query-param token (same JWT, used for <a href> downloads)
+  if (!userId && req.query.token) {
+    try { const p = verifyToken(req.query.token); userId = p.sub; } catch { /* ignore */ }
+  }
+  if (!userId) return res.status(401).json({ error: 'Authentication required' });
+
+  const asset = stmts.getAsset.get(req.params.id, userId);
   if (!asset) return res.status(404).json({ error: 'Asset not found' });
 
   const filepath = join(ASSETS_ROOT, String(asset.user_id), asset.filename);
@@ -49,7 +52,7 @@ router.get('/:id/file', (req, res) => {
   res.sendFile(filepath);
 });
 
-// Delete an asset
+// Delete an asset (mutating → CSRF protected globally)
 router.delete('/:id', expressAuth, (req, res) => {
   const asset = stmts.getAsset.get(req.params.id, req.user.id);
   if (!asset) return res.status(404).json({ error: 'Asset not found' });

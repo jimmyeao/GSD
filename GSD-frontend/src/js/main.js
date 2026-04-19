@@ -2,7 +2,13 @@ import { AGENTS, MODEL_BADGE_CLASS } from './agents.js';
 import { SocketClient } from './socketClient.js';
 import { Chat } from './chat.js';
 import { CodeView } from './codeView.js';
-import { getToken, getUser, isLoggedIn, login, register, logout, clearToken } from './auth.js';
+import { renderApprovalCard, setResolvedState, setErrorState } from './approvalCard.js';
+import {
+  startLogin, logout, getMe, getCachedUser,
+  primeCsrf, getProviders, fetchJson, AuthError,
+} from './auth.js';
+import { initAdmin } from './admin.js';
+import { initMail } from './mail.js';
 import { fetchConversations, fetchMessages, deleteConversation } from './conversations.js';
 import { fetchAssets, deleteAsset } from './assets.js';
 import { isSupported as voiceSupported, createRecognition, speak, stopSpeaking, isSpeaking, setTTSBackend, getSpeechQueue } from './voice.js';
@@ -16,11 +22,21 @@ let _optimiseTimer = null;
 let attachedFiles = []; // [{ name, content }]
 let currentConversationId = null;
 let conversations = [];
+let currentUser = null;
 
-// Derive the backend URL from whatever hostname the browser is using,
-// so Tailscale / remote access works without manual configuration.
-const DEFAULT_URL = `${window.location.protocol}//${window.location.hostname}:5000`;
-setTTSBackend(DEFAULT_URL);
+// Mail approval tracking: approvalId → HTMLElement (card in chat DOM).
+// Kept per-page (not per-conversation) so resolutions can find their card
+// even if the user has since switched conversations.
+const _approvalCards = new Map();
+// Pending approvals that arrived for other conversations — shown as a banner.
+let _pendingOtherConversations = new Set();
+let _approvalsHydrated = false;
+
+// Same-origin base URL. All API calls go via relative paths; this constant
+// is only used for the TTS backend (voice.js calls ${backend}/tts, so we
+// pass '/api' as the base to hit /api/tts through NGINX).
+const DEFAULT_URL = window.location.origin;
+setTTSBackend('/api');
 
 // ------------------------------------------------------------------ DOM refs
 const sidebar        = document.getElementById('sidebar');
@@ -45,13 +61,9 @@ const attachBtn      = document.getElementById('attach-btn');
 const fileInput      = document.getElementById('file-input');
 const attachedFilesEl = document.getElementById('attached-files');
 const authModal      = document.getElementById('auth-modal');
-const authForm       = document.getElementById('auth-form');
-const authUsername    = document.getElementById('auth-username');
-const authPassword   = document.getElementById('auth-password');
-const authSubmit     = document.getElementById('auth-submit');
 const authError      = document.getElementById('auth-error');
-const authSwitch     = document.getElementById('auth-switch');
-const authToggleText = document.getElementById('auth-toggle-text');
+const btnMsLogin     = document.getElementById('btn-ms-login');
+const btnGoogleLogin = document.getElementById('btn-google-login');
 const userLabel      = document.getElementById('user-label');
 const logoutBtn      = document.getElementById('logout-btn');
 const convList       = document.getElementById('conversation-list');
@@ -144,12 +156,10 @@ chat.onOpenInEditor(async ({ code, lang }) => {
   // If a project is loaded, save to workspace
   if (codeView._projectId) {
     try {
-      const token = getToken();
-      await fetch(`${DEFAULT_URL}/workspace/${codeView._projectId}/file?path=${encodeURIComponent(filename.trim())}`, {
-        method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: 'file', content: code }),
-      });
+      await fetchJson(
+        `/api/workspace/${encodeURIComponent(codeView._projectId)}/file?path=${encodeURIComponent(filename.trim())}`,
+        { method: 'POST', body: { type: 'file', content: code } }
+      );
       await codeView._fileTree.refresh();
     } catch { /* ignore — still open in editor */ }
   }
@@ -157,24 +167,20 @@ chat.onOpenInEditor(async ({ code, lang }) => {
   setViewMode('code');
 });
 
-// ------------------------------------------------------------------ Auth
-let authMode = 'login'; // or 'register'
+// ------------------------------------------------------------------ Auth UI
 
 function showAuth() {
   authModal.hidden = false;
-  authUsername.focus();
 }
 
 function hideAuth() {
   authModal.hidden = true;
   authError.hidden = true;
-  authForm.reset();
 }
 
 function updateAuthUI() {
-  const user = getUser();
-  if (user) {
-    userLabel.textContent = user.username;
+  if (currentUser) {
+    userLabel.textContent = currentUser.display_name || currentUser.email || currentUser.username || '';
     logoutBtn.hidden = false;
   } else {
     userLabel.textContent = '';
@@ -182,40 +188,28 @@ function updateAuthUI() {
   }
 }
 
-authSwitch.addEventListener('click', e => {
-  e.preventDefault();
-  authMode = authMode === 'login' ? 'register' : 'login';
-  authSubmit.textContent = authMode === 'login' ? 'Log in' : 'Register';
-  authSwitch.textContent = authMode === 'login' ? 'Register' : 'Log in';
-  authToggleText.textContent = authMode === 'login' ? 'No account?' : 'Already have an account?';
-  authError.hidden = true;
-});
-
-authForm.addEventListener('submit', async e => {
-  e.preventDefault();
-  const username = authUsername.value.trim();
-  const password = authPassword.value;
-  if (!username || !password) return;
-
-  authSubmit.disabled = true;
-  authError.hidden = true;
-
-  try {
-    if (authMode === 'login') {
-      await login(DEFAULT_URL, username, password);
-    } else {
-      await register(DEFAULT_URL, username, password);
-    }
-    hideAuth();
-    updateAuthUI();
-    boot();
-  } catch (err) {
-    authError.textContent = err.message;
+// Show "not authorized" error if redirected back after a denied OAuth login.
+function handleLoginError() {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('error') === 'not_authorized') {
+    authError.textContent = 'Your account is not authorized for this application. Please contact your administrator.';
     authError.hidden = false;
-  } finally {
-    authSubmit.disabled = false;
+    // Clean the URL so reload doesn't re-trigger the message.
+    try { window.history.replaceState({}, '', window.location.pathname); } catch (_) {}
   }
-});
+}
+
+// Hide whichever SSO buttons the server reports as disabled.
+async function applyProviderVisibility() {
+  try {
+    const providers = await getProviders();
+    if (btnMsLogin) btnMsLogin.hidden = !providers.microsoft;
+    if (btnGoogleLogin) btnGoogleLogin.hidden = !providers.google;
+  } catch (_) { /* leave both visible on failure */ }
+}
+
+if (btnMsLogin) btnMsLogin.addEventListener('click', () => startLogin('microsoft'));
+if (btnGoogleLogin) btnGoogleLogin.addEventListener('click', () => startLogin('google'));
 
 logoutBtn.addEventListener('click', () => logout());
 
@@ -261,12 +255,11 @@ function selectAgent(agent) {
 
 // ------------------------------------------------------------------ Conversations sidebar
 async function loadConversations() {
-  const token = getToken();
-  if (!token) return;
   try {
-    conversations = await fetchConversations(DEFAULT_URL, token);
+    conversations = await fetchConversations();
     renderConversationList();
   } catch (err) {
+    if (err instanceof AuthError) return; // reload already triggered
     console.error('[conversations] load failed:', err.message);
   }
 }
@@ -297,12 +290,12 @@ function renderConversationList() {
     del.addEventListener('click', async e => {
       e.stopPropagation();
       try {
-        await deleteConversation(DEFAULT_URL, getToken(), conv.id);
+        await deleteConversation(conv.id);
         conversations = conversations.filter(c => c.id !== conv.id);
         if (currentConversationId === conv.id) startNewChat();
         renderConversationList();
       } catch (err) {
-        chat.addErrorMessage(err.message);
+        if (!(err instanceof AuthError)) chat.addErrorMessage(err.message);
       }
     });
 
@@ -315,21 +308,32 @@ async function switchConversation(convId) {
   currentConversationId = convId;
   renderConversationList();
   chat.clear();
+  // Cards are tied to DOM elements that were just cleared — drop references.
+  _approvalCards.clear();
+  _pendingOtherConversations.delete(convId);
+  renderPendingApprovalsBanner();
 
   try {
-    const messages = await fetchMessages(DEFAULT_URL, getToken(), convId);
+    const messages = await fetchMessages(convId);
     messages.forEach(msg => {
-      chat.addRestoredMessage(msg.role, msg.content, msg.agent_id);
+      chat.addRestoredMessage(msg.role, msg.content, msg.agent_id, msg.created_at);
     });
   } catch (err) {
-    chat.addErrorMessage('Failed to load conversation');
+    if (!(err instanceof AuthError)) chat.addErrorMessage('Failed to load conversation');
   }
+
+  // Re-hydrate approvals for this conversation (if connected).
+  if (client && client.connected) hydratePendingApprovals();
+
   inputEl.focus();
 }
 
 function startNewChat() {
   currentConversationId = null;
   chat.clear();
+  _approvalCards.clear();
+  _pendingOtherConversations.clear();
+  renderPendingApprovalsBanner();
   renderConversationList();
   inputEl.focus();
 }
@@ -338,13 +342,11 @@ function startNewChat() {
 const ASSET_ICONS = { video: '🎬', image: '🖼', slide: '📊' };
 
 async function loadAssets() {
-  const token = getToken();
-  if (!token) return;
   try {
-    const assets = await fetchAssets(DEFAULT_URL, token);
+    const assets = await fetchAssets();
     renderAssets(assets);
   } catch (err) {
-    console.error('[assets] load failed:', err.message);
+    if (!(err instanceof AuthError)) console.error('[assets] load failed:', err.message);
   }
 }
 
@@ -358,8 +360,9 @@ function renderAssets(assets) {
 
     const sizeStr = asset.size_bytes ? `${(asset.size_bytes / 1024 / 1024).toFixed(1)}MB` : '';
     const dateStr = new Date(asset.created_at + 'Z').toLocaleDateString();
-    const token = getToken();
-    const fileUrl = `${DEFAULT_URL}/assets/${asset.id}/file?token=${encodeURIComponent(token)}`;
+    // Same-origin, cookie-auth download. No token in URL anymore — NGINX
+    // forwards the session cookie.
+    const fileUrl = `/api/assets/${encodeURIComponent(asset.id)}/file`;
 
     card.innerHTML = `
       <span class="asset-icon">${ASSET_ICONS[asset.type] || '📁'}</span>
@@ -373,11 +376,11 @@ function renderAssets(assets) {
 
     card.querySelector('.asset-del').addEventListener('click', async () => {
       try {
-        await deleteAsset(DEFAULT_URL, getToken(), asset.id);
+        await deleteAsset(asset.id);
         card.remove();
         if (!assetsGrid.children.length) assetsEmpty.hidden = false;
       } catch (err) {
-        console.error('[assets] delete failed:', err.message);
+        if (!(err instanceof AuthError)) console.error('[assets] delete failed:', err.message);
       }
     });
 
@@ -398,9 +401,9 @@ assetsClose.addEventListener('click', () => {
 function initConnection(url) {
   if (client) client.disconnect();
 
-  const token = getToken();
   setStatus('connecting', 'Connecting…');
-  client = new SocketClient(url || DEFAULT_URL, token);
+  // No url = default to current origin (NGINX proxies /socket.io).
+  client = new SocketClient(url);
 
   client.on('statusChange', ({ connected, reason }) => {
     if (connected) {
@@ -412,13 +415,12 @@ function initConnection(url) {
   });
 
   client.on('connectionError', ({ message }) => {
-    // If auth fails, clear token and force re-login
+    // If cookie auth was rejected, force a full reload so the login modal
+    // is shown again via getMe() returning null.
     const msg = (message || '').toLowerCase();
-    if (msg.includes('auth') || msg.includes('token') || msg.includes('expired')) {
-      clearToken();
-      updateAuthUI();
-      showAuth();
-      setStatus('offline', 'Session expired — please log in again');
+    if (msg.includes('auth') || msg.includes('unauthoriz') || msg.includes('forbidden')) {
+      setStatus('offline', 'Session expired — reloading…');
+      setTimeout(() => window.location.reload(), 400);
       return;
     }
     setStatus('offline', `Error: ${message}`);
@@ -474,7 +476,193 @@ function initConnection(url) {
     }
   });
 
+  // ── MailAgent approval events ────────────────────────────────────────
+  client.on('mailApprovalNeeded', (data) => {
+    handleApprovalNeeded(data);
+  });
+
+  client.on('mailApprovalResolved', (data) => {
+    handleApprovalResolved(data);
+  });
+
+  client.on('mailApprovalError', (data) => {
+    handleApprovalError(data);
+  });
+
+  client.on('mailContinuationStart', () => {
+    // Backend auto-re-invoked MailAgent; open a fresh assistant bubble so the
+    // upcoming tokens render (they'd otherwise drop on a closed stream).
+    try { chat.startAssistantStream('MailAgent'); } catch (_) { /* ignore */ }
+    setStreaming(true);
+  });
+
+  // On (re)connect, hydrate any pending approvals from the server.
+  client.on('statusChange', ({ connected }) => {
+    if (connected) hydratePendingApprovals();
+  });
+
   client.connect();
+}
+
+// ------------------------------------------------------------------ Mail approvals
+/**
+ * Render an approval card for the given payload. If `conversation_id` is
+ * present and doesn't match the current conversation, surface a banner
+ * rather than appending to a thread the user isn't looking at.
+ */
+function handleApprovalNeeded(data) {
+  if (!data || !data.approvalId) return;
+  // Idempotence guard — never double-render the same approval.
+  if (_approvalCards.has(data.approvalId)) return;
+
+  const convId = data.conversation_id || data.conversationId || null;
+  if (convId && currentConversationId && convId !== currentConversationId) {
+    _pendingOtherConversations.add(convId);
+    renderPendingApprovalsBanner();
+    return;
+  }
+
+  const card = renderApprovalCard(
+    chatMessages,
+    data,
+    {
+      onApprove: () => sendApprovalDecision(data.approvalId, 'approve'),
+      onReject:  () => sendApprovalDecision(data.approvalId, 'reject'),
+    },
+  );
+  _approvalCards.set(data.approvalId, card);
+}
+
+function handleApprovalResolved(data) {
+  if (!data || !data.approvalId) return;
+  const card = _approvalCards.get(data.approvalId);
+  if (card) {
+    setResolvedState(card, data.status || 'failed', { error: data.error });
+    _approvalCards.delete(data.approvalId);
+  }
+  // The backend follows this event with a summary streamed as token chunks.
+  // Open a fresh assistant bubble so those tokens render — otherwise
+  // chat.appendToken silently drops them because _streamEl is null from the
+  // original prompt's finaliseStream().
+  try { chat.startAssistantStream('MailAgent'); } catch (_) { /* ignore */ }
+}
+
+function handleApprovalError(data) {
+  const msg = (data && data.message) || 'Approval error';
+  if (data && data.approvalId && _approvalCards.has(data.approvalId)) {
+    setErrorState(_approvalCards.get(data.approvalId), msg);
+    _approvalCards.delete(data.approvalId);
+    return;
+  }
+  // Transient toast-style notice in the chat stream.
+  try { chat.addErrorMessage(msg); } catch (_) { /* ignore */ }
+}
+
+function sendApprovalDecision(approvalId, decision) {
+  if (!client || !client.connected) {
+    // Find the card and flag a failure — the user can retry when reconnected.
+    const card = _approvalCards.get(approvalId);
+    if (card) setErrorState(card, 'Not connected — try again when online.');
+    return;
+  }
+  try {
+    client.sendMailApprovalResponse(approvalId, decision);
+  } catch (err) {
+    const card = _approvalCards.get(approvalId);
+    if (card) setErrorState(card, err.message || 'Failed to send response');
+  }
+}
+
+/**
+ * On connect/reconnect, fetch any approvals still pending and render the
+ * ones that belong to the current conversation. Expired ones get a one-line
+ * status note instead of a full card.
+ */
+async function hydratePendingApprovals() {
+  let data;
+  try {
+    data = await fetchJson('/api/mail/approvals');
+  } catch (err) {
+    if (err instanceof AuthError) return;
+    // Endpoint may not exist yet; fail quiet so chat still works.
+    console.warn('[mail] approvals hydration failed:', err.message);
+    return;
+  }
+  _approvalsHydrated = true;
+  const approvals = (data && data.approvals) || [];
+  _pendingOtherConversations.clear();
+
+  approvals.forEach(a => {
+    if (!a || !a.id) return;
+    const convId = a.conversation_id || a.conversationId || null;
+    const approvalId = a.id;
+
+    if (a.status === 'expired') {
+      if (!convId || convId === currentConversationId) {
+        try { chat.addStatusMessage('Action expired — ask again to retry'); } catch (_) {}
+      }
+      return;
+    }
+
+    if (a.status && a.status !== 'pending') return;
+
+    if (_approvalCards.has(approvalId)) return;
+
+    if (convId && currentConversationId && convId !== currentConversationId) {
+      _pendingOtherConversations.add(convId);
+      return;
+    }
+
+    const card = renderApprovalCard(
+      chatMessages,
+      {
+        approvalId,
+        action: a.action,
+        payload: a.payload || {},
+        preview: a.preview || '',
+      },
+      {
+        onApprove: () => sendApprovalDecision(approvalId, 'approve'),
+        onReject:  () => sendApprovalDecision(approvalId, 'reject'),
+      },
+    );
+    _approvalCards.set(approvalId, card);
+  });
+
+  renderPendingApprovalsBanner();
+}
+
+function renderPendingApprovalsBanner() {
+  let banner = document.getElementById('mail-approvals-banner');
+  const count = _pendingOtherConversations.size;
+  if (count === 0) {
+    if (banner) banner.remove();
+    return;
+  }
+  if (!banner) {
+    banner = document.createElement('div');
+    banner.id = 'mail-approvals-banner';
+    banner.className = 'approvals-banner';
+    const label = document.createElement('span');
+    label.className = 'approvals-banner__label';
+    banner.appendChild(label);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'approvals-banner__btn';
+    btn.textContent = 'Open';
+    btn.addEventListener('click', () => {
+      const next = _pendingOtherConversations.values().next().value;
+      if (next) switchConversation(next);
+    });
+    banner.appendChild(btn);
+    chatMessages.prepend(banner);
+  }
+  const labelEl = banner.querySelector('.approvals-banner__label');
+  if (labelEl) {
+    labelEl.textContent = count === 1
+      ? 'You have 1 pending email action in another conversation.'
+      : `You have ${count} pending email actions in other conversations.`;
+  }
 }
 
 // ------------------------------------------------------------------ Files
@@ -624,9 +812,10 @@ settingsBtn.addEventListener('click', () => {
 });
 
 connectBtn.addEventListener('click', () => {
-  const url = urlInput.value.trim() || DEFAULT_URL;
+  const url = urlInput.value.trim();
   settingsPanel.hidden = true;
-  initConnection(url);
+  // Empty string => socket.io-client uses current origin.
+  initConnection(url || undefined);
 });
 
 // ------------------------------------------------------------------ Other bindings
@@ -688,8 +877,7 @@ function setViewMode(mode) {
 
   // Lazy-init the code view on first switch
   if (isCode && !codeView) {
-    const token = getToken();
-    codeView = new CodeView(codeViewContainer, DEFAULT_URL, token, client);
+    codeView = new CodeView(codeViewContainer, client);
     codeView.init();
   }
 
@@ -706,14 +894,36 @@ function boot() {
   buildSidebar();
   activeLabel.textContent = selectedAgent.label;
   exampleBanner.hidden = true;
-  initConnection(DEFAULT_URL);
+  initConnection();
 }
 
-// Gate on auth
-if (isLoggedIn()) {
-  hideAuth();
-  updateAuthUI();
-  boot();
-} else {
-  showAuth();
-}
+// ------------------------------------------------------------------ Init
+/**
+ * Session-start orchestration:
+ *   1. Prime CSRF cookie + cached token.
+ *   2. Probe auth providers so we know which buttons to show.
+ *   3. Surface the "?error=not_authorized" banner if present.
+ *   4. GET /api/auth/me. If 200 → boot the app. If 401 → show the modal.
+ */
+(async function init() {
+  handleLoginError();
+  await primeCsrf();
+  await applyProviderVisibility();
+  try {
+    currentUser = await getMe();
+  } catch (err) {
+    console.error('[auth] me() failed:', err);
+    currentUser = null;
+  }
+
+  if (currentUser) {
+    hideAuth();
+    updateAuthUI();
+    initAdmin(currentUser);
+    initMail(currentUser);
+    boot();
+  } else {
+    updateAuthUI();
+    showAuth();
+  }
+})();

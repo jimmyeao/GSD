@@ -34,18 +34,163 @@
   <div id="auth-modal" class="auth-modal">
     <div class="auth-card">
       <img class="auth-logo-img" src="src/img/logo.png" alt="Access" />
-      <h2 class="auth-title">GSD</h2>
-      <p class="auth-subtitle">Sign in to get stuff done</p>
-      <form id="auth-form" autocomplete="on">
-        <input id="auth-username" type="text" placeholder="Username" autocomplete="username" required />
-        <input id="auth-password" type="password" placeholder="Password" autocomplete="current-password" required />
-        <button type="submit" id="auth-submit">Log in</button>
-        <p id="auth-error" class="auth-error" hidden></p>
-      </form>
-      <p class="auth-toggle">
-        <span id="auth-toggle-text">No account?</span>
-        <a id="auth-switch" href="#">Register</a>
-      </p>
+      <h2 class="auth-title">GSD — Sign in</h2>
+      <p class="auth-subtitle">Sign in with your work account</p>
+      <div class="auth-sso-group">
+        <button type="button" id="btn-ms-login" class="auth-sso-btn auth-sso-ms">
+          <span class="auth-sso-icon" aria-hidden="true">
+            <svg viewBox="0 0 23 23" width="18" height="18" xmlns="http://www.w3.org/2000/svg">
+              <rect x="1"  y="1"  width="10" height="10" fill="#F25022"/>
+              <rect x="12" y="1"  width="10" height="10" fill="#7FBA00"/>
+              <rect x="1"  y="12" width="10" height="10" fill="#00A4EF"/>
+              <rect x="12" y="12" width="10" height="10" fill="#FFB900"/>
+            </svg>
+          </span>
+          <span>Sign in with Microsoft</span>
+        </button>
+        <button type="button" id="btn-google-login" class="auth-sso-btn auth-sso-google">
+          <span class="auth-sso-icon" aria-hidden="true">
+            <svg viewBox="0 0 48 48" width="18" height="18" xmlns="http://www.w3.org/2000/svg">
+              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+              <path fill="none" d="M0 0h48v48H0z"/>
+            </svg>
+          </span>
+          <span>Sign in with Google</span>
+        </button>
+      </div>
+      <p id="auth-error" class="auth-error" hidden></p>
+    </div>
+  </div>
+
+  <!-- ── Admin panel (hidden unless admin) ────────────────────── -->
+  <div id="admin-panel" class="admin-panel" hidden>
+    <div class="admin-card">
+      <div class="admin-header">
+        <h3>User Access</h3>
+        <button id="admin-close" class="admin-close-btn">Close</button>
+      </div>
+      <div class="admin-tabs">
+        <button id="admin-tab-emails" class="admin-tab active">Allowed Emails</button>
+        <button id="admin-tab-users" class="admin-tab">Users</button>
+      </div>
+
+      <div id="admin-pane-emails" class="admin-pane">
+        <div class="admin-pane-head">
+          <button id="admin-add-toggle" class="admin-add-btn">+ Add</button>
+        </div>
+        <div id="admin-add-form" class="admin-add-form" hidden>
+          <label class="admin-form-row">
+            <span>Email</span>
+            <input id="admin-add-email" type="text" placeholder="person@example.com or @example.com" />
+          </label>
+          <label class="admin-form-row">
+            <span>Role</span>
+            <select id="admin-add-role">
+              <option value="user">user</option>
+              <option value="admin">admin</option>
+            </select>
+          </label>
+          <label class="admin-form-row admin-form-check">
+            <input id="admin-add-domain" type="checkbox" />
+            <span>Match all emails at this domain (use @example.com)</span>
+          </label>
+          <label class="admin-form-row">
+            <span>Note</span>
+            <input id="admin-add-note" type="text" placeholder="Optional" />
+          </label>
+          <p id="admin-add-error" class="admin-form-error" hidden></p>
+          <div class="admin-form-actions">
+            <button id="admin-add-cancel" type="button" class="admin-btn-secondary">Cancel</button>
+            <button id="admin-add-save" type="button" class="admin-btn-primary">Save</button>
+          </div>
+        </div>
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Email</th><th>Role</th><th>Match</th><th>Added by</th><th>Created</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="admin-emails-body"></tbody>
+        </table>
+      </div>
+
+      <div id="admin-pane-users" class="admin-pane" hidden>
+        <table class="admin-table">
+          <thead>
+            <tr>
+              <th>Email</th><th>Display name</th><th>Role</th><th>Provider</th><th>Joined</th>
+            </tr>
+          </thead>
+          <tbody id="admin-users-body"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Mail & Calendar panel (hidden by default) ────────────── -->
+  <div id="mail-panel" class="mail-panel" hidden>
+    <div class="mail-card">
+      <div class="mail-header">
+        <h3>Mail &amp; Calendar</h3>
+        <button id="mail-close" class="mail-close-btn">Close</button>
+      </div>
+      <p id="mail-banner" class="mail-banner" hidden></p>
+      <div class="mail-tabs">
+        <button id="mail-tab-accounts" class="mail-tab active">Accounts</button>
+        <button id="mail-tab-inbox" class="mail-tab">Inbox</button>
+        <button id="mail-tab-calendar" class="mail-tab">Calendar</button>
+      </div>
+
+      <!-- Accounts pane -->
+      <div id="mail-pane-accounts" class="mail-pane">
+        <div class="mail-pane-head">
+          <div class="mail-connect-buttons">
+            <button type="button" id="mail-connect-ms" class="mail-btn-primary">Connect Microsoft</button>
+            <button type="button" id="mail-connect-google" class="mail-btn-primary">Connect Google</button>
+          </div>
+          <button type="button" id="mail-accounts-refresh" class="mail-btn-secondary">Refresh</button>
+        </div>
+        <div id="mail-accounts-list" class="mail-accounts-list"></div>
+      </div>
+
+      <!-- Inbox pane -->
+      <div id="mail-pane-inbox" class="mail-pane mail-pane-inbox" hidden>
+        <div class="mail-inbox-toolbar">
+          <select id="mail-inbox-account" class="mail-select"></select>
+          <select id="mail-inbox-folder" class="mail-select"></select>
+          <input id="mail-inbox-search" class="mail-search" type="search" placeholder="Search…" autocomplete="off" />
+          <button type="button" id="mail-inbox-refresh" class="mail-btn-secondary">Refresh</button>
+        </div>
+        <div class="mail-inbox-split">
+          <div id="mail-message-list" class="mail-message-list">
+            <p class="mail-empty">Select an account.</p>
+          </div>
+          <div id="mail-reader" class="mail-reader">
+            <p class="mail-empty">Select a message to read.</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Calendar pane -->
+      <div id="mail-pane-calendar" class="mail-pane" hidden>
+        <div class="mail-cal-toolbar">
+          <select id="mail-cal-account" class="mail-select"></select>
+          <label class="mail-cal-label">From <input id="mail-cal-from" type="date" /></label>
+          <label class="mail-cal-label">To <input id="mail-cal-to" type="date" /></label>
+          <button type="button" id="mail-cal-load" class="mail-btn-secondary">Load</button>
+          <div class="mail-cal-quick">
+            <button type="button" id="mail-cal-today" class="mail-btn-secondary">Today</button>
+            <button type="button" id="mail-cal-next7" class="mail-btn-secondary">Next 7 days</button>
+            <button type="button" id="mail-cal-next30" class="mail-btn-secondary">Next 30 days</button>
+          </div>
+        </div>
+        <div id="mail-cal-list" class="mail-cal-list">
+          <p class="mail-empty">Select a range to load events.</p>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -75,6 +220,8 @@
 
     <button id="clear-btn" title="New chat">New Chat</button>
     <button id="assets-btn" title="Generated assets">Assets</button>
+    <button id="mail-btn" title="Mail &amp; Calendar" hidden>Mail</button>
+    <button id="admin-btn" title="Admin panel" hidden>Admin</button>
     <span id="user-label"></span>
     <button id="logout-btn" hidden>Logout</button>
     <button id="settings-btn" title="Backend settings">⚙ Settings</button>

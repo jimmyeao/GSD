@@ -2,7 +2,18 @@
  * Voice utilities — speech recognition (input) and Kokoro TTS (output).
  */
 
+import { getCsrfToken } from './auth.js';
+
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+// TTS is a POST → it needs the CSRF header to pass the backend's double-submit
+// cookie check. Reads the cookie fresh on every call so rotations are handled.
+function _ttsHeaders() {
+  const h = { 'Content-Type': 'application/json' };
+  const csrf = getCsrfToken();
+  if (csrf) h['X-CSRF-Token'] = csrf;
+  return h;
+}
 
 // Kill orphaned audio on load
 window.speechSynthesis?.cancel();
@@ -66,7 +77,8 @@ export function speak(text, opts = {}) {
   _abort = new AbortController();
   fetch(`${url}/tts`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: _ttsHeaders(),
+    credentials: 'include',
     body: JSON.stringify({ text, speed: opts.speed }),
     signal: _abort.signal,
   })
@@ -197,7 +209,8 @@ class SpeechQueue {
 
       fetch(`${_backendUrl}/tts`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: _ttsHeaders(),
+        credentials: 'include',
         body: JSON.stringify({ text }),
         signal: abort.signal,
       })

@@ -7,18 +7,15 @@ import { Editor } from './editor.js';
 import { FileTree } from './fileTree.js';
 import { Terminal } from './terminal.js';
 import { isSupported as voiceSupported, createRecognition, speak, stopSpeaking, isSpeaking } from './voice.js';
+import { fetchJson } from './auth.js';
 
 export class CodeView {
   /**
    * @param {HTMLElement} containerEl - main container div
-   * @param {string} backendUrl
-   * @param {string} token
    * @param {object} socketClient - SocketClient instance for container logs
    */
-  constructor(containerEl, backendUrl, token, socketClient) {
+  constructor(containerEl, socketClient) {
     this._root = containerEl;
-    this._url = backendUrl;
-    this._token = token;
     this._socket = socketClient;
     this._visible = false;
     this._projectId = null;
@@ -141,7 +138,7 @@ export class CodeView {
 
     // Create sub-components
     this._editor = new Editor(this._editorDiv);
-    this._fileTree = new FileTree(this._sidebarDiv, this._url, this._token);
+    this._fileTree = new FileTree(this._sidebarDiv);
     this._terminal = new Terminal(this._terminalDiv);
     // Intercept terminal output so CoderAgent can see it
     const origAppend = this._terminal.appendOutput.bind(this._terminal);
@@ -156,11 +153,10 @@ export class CodeView {
     // File tree → open in editor
     this._fileTree.onSelect(async ({ path, name }) => {
       try {
-        const res = await this._apiFetch(
+        const data = await this._apiFetch(
           `/workspace/${this._projectId}/file?path=${encodeURIComponent(path)}`
         );
-        const data = await res.json();
-        this._editor.openFile(path, data.content || '');
+        this._editor.openFile(path, (data && data.content) || '');
       } catch (err) {
         this._terminal.appendOutput(`Error opening ${name}: ${err.message}`);
       }
@@ -243,12 +239,11 @@ export class CodeView {
     this._terminal.onCommand(async (cmd) => {
       if (!this._containerId) { this._terminal.appendOutput('No running container. Click Run first.'); return; }
       try {
-        const res = await this._apiFetch(`/sandbox/${this._containerId}/exec`, {
-          method: 'POST', body: JSON.stringify({ cmd }),
+        const data = await this._apiFetch(`/sandbox/${this._containerId}/exec`, {
+          method: 'POST', body: { cmd },
         });
-        const data = await res.json();
-        if (data.output) this._terminal.appendOutput(data.output);
-        if (data.exitCode !== 0) this._terminal.appendOutput(`Exit code: ${data.exitCode}`);
+        if (data && data.output) this._terminal.appendOutput(data.output);
+        if (data && data.exitCode !== 0) this._terminal.appendOutput(`Exit code: ${data.exitCode}`);
       } catch (err) { this._terminal.appendOutput(`Exec error: ${err.message}`); }
     });
 
@@ -354,9 +349,8 @@ export class CodeView {
         this._terminal.appendOutput(`Auto-saved: ${path}`);
         await this._fileTree.refresh();
         try {
-          const res = await this._apiFetch(`/workspace/${this._projectId}/file?path=${encodeURIComponent(path)}`);
-          const data = await res.json();
-          this._editor.openFile(path, data.content || '');
+          const data = await this._apiFetch(`/workspace/${this._projectId}/file?path=${encodeURIComponent(path)}`);
+          this._editor.openFile(path, (data && data.content) || '');
         } catch { /* ignore */ }
       });
 
@@ -381,10 +375,9 @@ export class CodeView {
 
   async _loadProjects() {
     try {
-      const res = await this._apiFetch('/workspace/projects');
-      const data = await res.json();
+      const data = await this._apiFetch('/workspace/projects');
       this._projectSelect.innerHTML = '<option value="">Select project...</option>';
-      const projects = data.projects || [];
+      const projects = (data && data.projects) || [];
       projects.forEach(p => {
         const o = document.createElement('option'); o.value = p.id; o.textContent = p.name; this._projectSelect.appendChild(o);
       });
@@ -399,10 +392,9 @@ export class CodeView {
     const name = prompt('Project name:');
     if (!name?.trim()) return;
     try {
-      const res = await this._apiFetch('/workspace/projects', {
-        method: 'POST', body: JSON.stringify({ name: name.trim() }),
+      const data = await this._apiFetch('/workspace/projects', {
+        method: 'POST', body: { name: name.trim() },
       });
-      const data = await res.json();
       this._terminal.appendOutput(`Created project: ${data.project.name}`);
       await this._loadProjects();
       this._projectSelect.value = data.project.id;
@@ -419,8 +411,7 @@ export class CodeView {
     this._setBusy(true, 'Detecting...');
 
     try {
-      const res = await this._apiFetch(`/workspace/${this._projectId}/detect`);
-      const info = await res.json();
+      const info = await this._apiFetch(`/workspace/${this._projectId}/detect`);
       this._terminal.appendOutput(`Detected: ${info.type}`);
 
       if (info.type === 'compose') {
@@ -447,10 +438,9 @@ export class CodeView {
 
   async _runContainerWithImage(image, installCmd, startCmd) {
     try {
-      const res = await this._apiFetch('/sandbox', {
-        method: 'POST', body: JSON.stringify({ projectId: this._projectId, image }),
+      const data = await this._apiFetch('/sandbox', {
+        method: 'POST', body: { projectId: this._projectId, image },
       });
-      const data = await res.json();
       this._containerId = data.container?.id;
       this._terminal.appendOutput(`Container created: ${data.container?.name || this._containerId}`);
 
@@ -459,9 +449,8 @@ export class CodeView {
 
       // Show port mappings
       try {
-        const portsRes = await this._apiFetch(`/sandbox/${this._containerId}/ports`);
-        const portsData = await portsRes.json();
-        if (portsData.ports?.length) {
+        const portsData = await this._apiFetch(`/sandbox/${this._containerId}/ports`);
+        if (portsData && portsData.ports?.length) {
           portsData.ports.forEach(p => {
             this._terminal.appendOutput(`Port ${p.container} → http://${window.location.hostname}:${p.host}`);
           });
@@ -475,11 +464,10 @@ export class CodeView {
       if (installCmd) {
         this._terminal.appendOutput(`\nInstalling dependencies: ${installCmd}`);
         try {
-          const r = await this._apiFetch(`/sandbox/${this._containerId}/exec`, {
-            method: 'POST', body: JSON.stringify({ cmd: installCmd }),
+          const d = await this._apiFetch(`/sandbox/${this._containerId}/exec`, {
+            method: 'POST', body: { cmd: installCmd },
           });
-          const d = await r.json();
-          if (d.output) this._terminal.appendOutput(d.output);
+          if (d && d.output) this._terminal.appendOutput(d.output);
         } catch (err) { this._terminal.appendOutput(`Install error: ${err.message}`); }
       }
       if (startCmd) {
@@ -487,8 +475,8 @@ export class CodeView {
         try {
           // Run start command in background (don't await — it's a long-running process)
           this._apiFetch(`/sandbox/${this._containerId}/exec`, {
-            method: 'POST', body: JSON.stringify({ cmd: `${startCmd} &` }),
-          }).then(r => r.json()).then(d => { if (d.output) this._terminal.appendOutput(d.output); }).catch(() => {});
+            method: 'POST', body: { cmd: `${startCmd} &` },
+          }).then(d => { if (d && d.output) this._terminal.appendOutput(d.output); }).catch(() => {});
         } catch { /* ignore */ }
       }
     } catch (err) {
@@ -572,7 +560,7 @@ export class CodeView {
     const port = prompt('Port to preview:', '3000');
     if (!port) return;
     if (this._containerId) {
-      window.open(`${this._url}/preview/${this._containerId}/?port=${port}`, '_blank');
+      window.open(`/api/preview/${this._containerId}/?port=${port}`, '_blank');
     } else {
       window.open(`http://${window.location.hostname}:${port}`, '_blank');
     }
@@ -594,11 +582,10 @@ export class CodeView {
       this._envPanel.querySelector('.env-save-btn').addEventListener('click', () => this._saveEnvVars());
     }
     try {
-      const res = await this._apiFetch(`/workspace/projects/${this._projectId}/env`);
-      const data = await res.json();
+      const data = await this._apiFetch(`/workspace/projects/${this._projectId}/env`);
       const rows = this._envPanel.querySelector('.env-rows');
       rows.innerHTML = '';
-      const env = data.env || {};
+      const env = (data && data.env) || {};
       if (Object.keys(env).length === 0) this._addEnvRow('', '');
       else Object.entries(env).forEach(([k, v]) => this._addEnvRow(k, v));
     } catch (err) { this._terminal.appendOutput(`Failed to load env vars: ${err.message}`); return; }
@@ -624,7 +611,7 @@ export class CodeView {
     });
     try {
       await this._apiFetch(`/workspace/projects/${this._projectId}/env`, {
-        method: 'PUT', body: JSON.stringify({ env }),
+        method: 'PUT', body: { env },
       });
       this._terminal.appendOutput('Environment variables saved.');
       this._envPanel.hidden = true;
@@ -677,17 +664,16 @@ export class CodeView {
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  /**
+   * Same-origin JSON fetch via fetchJson. Returns parsed JSON (or null on
+   * empty body). Accepts the legacy "/workspace/..." style paths and
+   * prepends "/api".
+   *
+   * If opts.body is a string, it's passed through (fetchJson will set
+   * Content-Type: application/json). Objects are auto-stringified.
+   */
   async _apiFetch(path, opts = {}) {
-    const headers = {
-      'Authorization': `Bearer ${this._token}`,
-      'Content-Type': 'application/json',
-      ...(opts.headers || {}),
-    };
-    const res = await fetch(`${this._url}${path}`, { ...opts, headers });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(text || `HTTP ${res.status}`);
-    }
-    return res;
+    const full = path.startsWith('/api/') ? path : `/api${path}`;
+    return fetchJson(full, opts);
   }
 }
