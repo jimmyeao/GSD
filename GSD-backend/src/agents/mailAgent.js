@@ -52,7 +52,7 @@ export const MAIL_TOOLS = [
             default: 'inbox',
             description: 'inbox | sent | drafts | trash | junk (MS) | spam (Gmail) | archive | clutter (MS legacy) | all (whole mailbox)',
           },
-          limit: { type: 'integer', default: 25, maximum: 50 },
+          limit: { type: 'integer', default: 15, maximum: 50 },
           query: { type: 'string', description: 'Optional free-text search (sender, subject, body).' },
         },
         required: ['account_id'],
@@ -648,12 +648,23 @@ async function runReadTool(user, name, args) {
     }
     case 'list_messages': {
       const folder = args.folder || 'inbox';
-      const limit = Math.max(1, Math.min(50, Number(args.limit) || 10));
+      const limit = Math.max(1, Math.min(50, Number(args.limit) || 15));
       const q = args.query || '';
-      return withAccount(accountId, user.id, async (provider, accessToken) => {
+      const full = await withAccount(accountId, user.id, async (provider, accessToken) => {
         const adapter = getProviderAdapter(provider);
         return adapter.listMessages(accessToken, { folder, limit, q });
       });
+      // Compact the result before handing it to the model — the agent only
+      // needs id/from/subject/snippet/date to decide which emails match and
+      // emit tool calls. Stripping the rest keeps iter-N prompt-eval under
+      // control on large-context models like qwen3:32b.
+      return (Array.isArray(full) ? full : []).map(m => ({
+        id: m.id,
+        from: m.from?.email || m.from?.name || '',
+        subject: m.subject || '',
+        snippet: (m.snippet || '').slice(0, 120),
+        date: m.date || null,
+      }));
     }
     case 'get_message': {
       if (!args.message_id) throw new Error('message_id required');
@@ -881,6 +892,7 @@ export async function runMailAgent({ socket, user, content, history = [], convId
   try {
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
       let resp;
+      const iterStart = Date.now();
       try {
         resp = await completeWithTools(modelCfg.endpoint, modelCfg.model, messages, {
           signal: abort.signal,
@@ -889,6 +901,12 @@ export async function runMailAgent({ socket, user, content, history = [], convId
           // Batch actions (10+ unsubscribes in one turn) need room for many
           // tool-call JSON blocks; 2048 was clipping them to a single call.
           numPredict: 6144,
+          // qwen3:32b's default num_ctx gets requested as 262144 and clamped
+          // to the training context 40960 — which means a 5.3 GiB KV cache
+          // and attention compute over 40k positions per token. Force 16384
+          // explicitly; still comfortably larger than any real mail tool
+          // loop (compacted list_messages × 2 accounts ≈ 2k tokens).
+          numCtx: 16384,
         });
       } catch (err) {
         if (err instanceof LLMUnavailableError) {
@@ -904,7 +922,10 @@ export async function runMailAgent({ socket, user, content, history = [], convId
       try {
         console.log(`[MailAgent] iter=${iter} tool_calls=${toolCalls?.length ?? 0}`
           + (toolCalls?.length ? ` names=${toolCalls.map(t => t.function?.name).join(',')}` : '')
-          + (resp.finish_reason ? ` finish=${resp.finish_reason}` : ''));
+          + (resp.finish_reason ? ` finish=${resp.finish_reason}` : '')
+          + ` elapsed=${Date.now() - iterStart}ms`
+          + ` msgs=${messages.length}`
+          + ` model=${modelCfg.model}`);
       } catch { /* ignore */ }
       if (!toolCalls || toolCalls.length === 0) {
         // Final answer — stream content
