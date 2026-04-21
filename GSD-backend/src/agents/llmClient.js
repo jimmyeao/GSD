@@ -73,12 +73,19 @@ async function* streamOpenAICompat(endpoint, model, messages, opts) {
 // ── Ollama native streaming (/api/chat with think:false) ──────────────
 async function* streamOllamaNative(endpoint, model, messages, opts) {
   const url = `${endpoint}/api/chat`;
+  const options = {
+    temperature: opts.temperature ?? 0.7,
+    num_predict: opts.maxTokens ?? 4096,
+    // Ollama defaults num_ctx tiny (2k-4k) unless set; tool loops and big
+    // projects exceed it silently otherwise. Callers can override via numCtx.
+    ...(opts.numCtx ? { num_ctx: opts.numCtx } : {}),
+  };
   const body = JSON.stringify({
     model,
     messages,
     stream: true,
     think: false,
-    options: { temperature: opts.temperature ?? 0.7, num_predict: opts.maxTokens ?? 4096 },
+    options,
   });
 
   const response = await fetchOrThrow(url, body, opts.signal);
@@ -136,6 +143,11 @@ export async function completeWithTools(endpoint, model, messages, opts = {}) {
     options: {
       temperature: opts.temperature ?? 0.4,
       num_predict: opts.numPredict ?? 2048,
+      // num_ctx is NOT forced here. Setting it explicitly to 32k dramatically
+      // slows qwen3:32b inference (bigger KV cache, slower attention) — and
+      // with compacted list_messages output the real context stays small.
+      // If a specific caller needs more, pass opts.numCtx.
+      ...(opts.numCtx ? { num_ctx: opts.numCtx } : {}),
     },
   };
   if (Array.isArray(opts.tools) && opts.tools.length) {
@@ -146,15 +158,27 @@ export async function completeWithTools(endpoint, model, messages, opts = {}) {
   }
 
   async function call(callPayload = payload) {
+    // Combine user-abort with a per-request timeout so a hung Ollama doesn't
+    // burn indefinitely; 5 min accommodates slow prompt-eval on 30B+ models
+    // with large tool-call histories while still bailing on a real wedge.
+    const timeoutSignal = AbortSignal.timeout(300_000);
+    const combined = opts.signal
+      ? AbortSignal.any([opts.signal, timeoutSignal])
+      : timeoutSignal;
+    const t0 = Date.now();
     let resp;
     try {
       resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(callPayload),
-        signal: opts.signal,
+        signal: combined,
       });
     } catch (err) {
+      const elapsed = Date.now() - t0;
+      const timedOut = timeoutSignal.aborted;
+      console.warn('[llm] fetch failed after %dms (timeout=%s user-abort=%s): %s',
+        elapsed, timedOut, opts.signal?.aborted ?? false, err.message);
       throw new LLMUnavailableError(endpoint, err.message);
     }
     if (!resp.ok) {

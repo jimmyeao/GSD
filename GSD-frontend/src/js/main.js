@@ -312,6 +312,7 @@ async function switchConversation(convId) {
   _approvalCards.clear();
   _pendingOtherConversations.delete(convId);
   renderPendingApprovalsBanner();
+  renderBulkApproveBar();
 
   try {
     const messages = await fetchMessages(convId);
@@ -334,6 +335,7 @@ function startNewChat() {
   _approvalCards.clear();
   _pendingOtherConversations.clear();
   renderPendingApprovalsBanner();
+  renderBulkApproveBar();
   renderConversationList();
   inputEl.focus();
 }
@@ -531,6 +533,7 @@ function handleApprovalNeeded(data) {
     },
   );
   _approvalCards.set(data.approvalId, card);
+  renderBulkApproveBar();
 }
 
 function handleApprovalResolved(data) {
@@ -540,6 +543,7 @@ function handleApprovalResolved(data) {
     setResolvedState(card, data.status || 'failed', { error: data.error });
     _approvalCards.delete(data.approvalId);
   }
+  renderBulkApproveBar();
   // The backend follows this event with a summary streamed as token chunks.
   // Open a fresh assistant bubble so those tokens render — otherwise
   // chat.appendToken silently drops them because _streamEl is null from the
@@ -552,10 +556,68 @@ function handleApprovalError(data) {
   if (data && data.approvalId && _approvalCards.has(data.approvalId)) {
     setErrorState(_approvalCards.get(data.approvalId), msg);
     _approvalCards.delete(data.approvalId);
+    renderBulkApproveBar();
     return;
   }
   // Transient toast-style notice in the chat stream.
   try { chat.addErrorMessage(msg); } catch (_) { /* ignore */ }
+}
+
+// Shows a sticky "Approve all (N)" bar at the top of the chat whenever 2+
+// approval cards are pending for the active conversation. One click fires
+// approve for every outstanding card — the backend handles each as a normal
+// approve_response event, so resolutions still arrive per-card.
+function renderBulkApproveBar() {
+  const chatWrap = chatMessages;
+  if (!chatWrap) return;
+  let bar = document.getElementById('mail-bulk-approve-bar');
+  const pendingIds = [..._approvalCards.keys()].filter(id => {
+    const c = _approvalCards.get(id);
+    return c && !c.dataset.decided;
+  });
+  const count = pendingIds.length;
+  if (count < 2) {
+    if (bar) bar.remove();
+    return;
+  }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'mail-bulk-approve-bar';
+    bar.className = 'approvals-banner';
+    bar.style.position = 'sticky';
+    bar.style.top = '0';
+    bar.style.zIndex = '10';
+    const label = document.createElement('span');
+    label.className = 'approvals-banner__label';
+    bar.appendChild(label);
+    const approveBtn = document.createElement('button');
+    approveBtn.type = 'button';
+    approveBtn.className = 'approvals-banner__btn';
+    approveBtn.addEventListener('click', () => {
+      if (approveBtn.disabled) return;
+      approveBtn.disabled = true;
+      approveBtn.textContent = 'Approving…';
+      const ids = [..._approvalCards.keys()].filter(id => {
+        const c = _approvalCards.get(id);
+        return c && !c.dataset.decided;
+      });
+      for (const id of ids) {
+        const c = _approvalCards.get(id);
+        if (!c) continue;
+        // Mark decided locally (same state setApprovalCard sets on click) so
+        // we don't re-send if another resolution interleaves.
+        c.dataset.decided = '1';
+        c.querySelectorAll('.approval-card__btn').forEach(b => (b.disabled = true));
+        sendApprovalDecision(id, 'approve');
+      }
+    });
+    bar.appendChild(approveBtn);
+    chatWrap.prepend(bar);
+  }
+  const labelEl = bar.querySelector('.approvals-banner__label');
+  const btnEl = bar.querySelector('.approvals-banner__btn');
+  if (labelEl) labelEl.textContent = `${count} approvals pending — `;
+  if (btnEl && !btnEl.disabled) btnEl.textContent = `Approve all ${count}`;
 }
 
 function sendApprovalDecision(approvalId, decision) {
@@ -630,6 +692,7 @@ async function hydratePendingApprovals() {
   });
 
   renderPendingApprovalsBanner();
+  renderBulkApproveBar();
 }
 
 function renderPendingApprovalsBanner() {

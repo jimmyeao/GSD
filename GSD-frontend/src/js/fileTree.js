@@ -7,6 +7,7 @@ import { fetchJson } from './auth.js';
 const FILE_ICONS = {
   js: 'JS', ts: 'TS', py: 'Py', json: '{}', html: '<>', css: '#',
   md: 'M', sh: '$', sql: 'Q', go: 'Go', rs: 'Rs', java: 'Jv',
+  lua: 'Lu',
 };
 
 function iconForFile(name) {

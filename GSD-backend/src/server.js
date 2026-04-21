@@ -15,17 +15,19 @@ import { buildPptx, parseSlideResponse } from './agents/slideBuilder.js';
 import { resolveVisuals } from './orchestrator.js';
 import { stmts, expireStaleApprovals } from './db.js';
 import { runMailAgent, executeApprovedAction, summariseExecution, isCompoundRequest } from './agents/mailAgent.js';
-import { socketAuth, csrfProtect } from './auth.js';
+import { socketAuth, csrfProtect, userFromRequest } from './auth.js';
+import { handleUpgrade as handlePreviewUpgrade } from './routes/preview.js';
 import authRoutes from './routes/auth.js';
 import convRoutes from './routes/conversations.js';
 import assetsRoutes from './routes/assets.js';
 import workspaceRoutes from './routes/workspace.js';
+import gitRoutes from './routes/git.js';
 import sandboxRoutes from './routes/sandbox.js';
 import previewRoutes from './routes/preview.js';
 import adminRoutes from './routes/admin.js';
 import mailRoutes from './routes/mail.js';
 import { isTokenKeyValid } from './mail/tokens.js';
-import { mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync, statSync } from 'node:fs';
 
 const app = express();
 // Backend runs behind NGINX which terminates TLS; always bind plain HTTP.
@@ -49,6 +51,19 @@ const io = new Server(httpServer, {
   maxHttpBufferSize: 20 * 1024 * 1024,
 });
 
+// WebSocket upgrade routing: Socket.IO's ws path is /socket.io/, but we also
+// serve noVNC websockets at /api/preview/<containerId>/websockify. Route
+// those to the preview proxy; let everything else fall through so Socket.IO
+// can handle its own upgrades.
+httpServer.on('upgrade', (req, socket, head) => {
+  const url = req.url || '';
+  if (/^\/api\/preview\/\d+\/websockify/.test(url) || /^\/preview\/\d+\/websockify/.test(url)) {
+    handlePreviewUpgrade(req, socket, head, async (r) => userFromRequest(r));
+    return;
+  }
+  // else: Socket.IO's own upgrade handler will pick it up via its listener.
+});
+
 // ── Middleware ──────────────────────────────────────────────────────
 // cookieParser must run before csrfProtect / routes that read cookies.
 // The secret enables signed cookies (used for the OAuth state cookie).
@@ -67,6 +82,7 @@ app.use('/admin', adminRoutes);
 app.use('/conversations', convRoutes);
 app.use('/assets', assetsRoutes);
 app.use('/workspace', workspaceRoutes);
+app.use('/git', gitRoutes);
 app.use('/sandbox', sandboxRoutes);
 app.use('/preview', previewRoutes);
 app.use('/mail', mailRoutes);
@@ -400,6 +416,14 @@ io.on('connection', (socket) => {
   // ── Code-mode: CoderAgent with auto-save ──────────────────────────
   socket.on('code:message', async ({ content, projectId, conversationId, history = [] }) => {
     if (!content?.trim() || !projectId) return;
+    // Hoisted so the catch block can safely reference them even if we throw
+    // before the stream starts.
+    let userAbort = null;
+    let disconnectTimer = null;
+    let onDisconnect = null;
+    const onReconnectCancel = () => {
+      if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+    };
     try {
       const project = stmts.getProject.get(projectId, socket.user.id);
       if (!project) { socket.emit('code:error', { message: 'Project not found' }); return; }
@@ -407,43 +431,128 @@ io.on('connection', (socket) => {
       const wsRoot = join(__dirname, '..', 'data', 'workspaces', String(socket.user.id), String(projectId));
       mkdirSync(wsRoot, { recursive: true });
 
-      // Build file tree
-      function buildFileList(dir, prefix = '') {
-        let result = '';
+      // Build file tree + inline current contents (size-capped) so the agent
+      // can actually READ the project. Previously the agent only saw names
+      // and would hallucinate file contents — or worse, emit empty tagged
+      // code blocks that overwrote real files.
+      const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', '.cache']);
+      const BINARY_EXT = /\.(png|jpg|jpeg|gif|webp|bmp|ico|svgz|mp3|mp4|mov|wav|ogg|pdf|zip|tar|gz|bz2|7z|woff2?|ttf|otf|eot|bin|exe|dll|so|dylib)$/i;
+      const PER_FILE_BYTES = 28 * 1024;      // truncate individual files
+      const TOTAL_INLINE_BYTES = 120 * 1024; // overall cap — leave context for history/response
+
+      function walkFiles(dir, rel = '') {
+        const out = [];
         try {
           const entries = readdirSync(dir, { withFileTypes: true });
           for (const e of entries) {
-            if (e.name === 'node_modules' || e.name === '.git') continue;
-            if (e.isDirectory()) {
-              result += `${prefix}${e.name}/\n` + buildFileList(join(dir, e.name), prefix + '  ');
-            } else {
-              result += `${prefix}${e.name}\n`;
-            }
+            if (SKIP_DIRS.has(e.name)) continue;
+            if (e.name.startsWith('.env')) continue; // never include secrets
+            const abs = join(dir, e.name);
+            const relPath = rel ? `${rel}/${e.name}` : e.name;
+            if (e.isDirectory()) out.push(...walkFiles(abs, relPath));
+            else out.push({ rel: relPath, abs });
           }
-        } catch { /* empty or unreadable dir */ }
-        return result;
+        } catch { /* ignore unreadable */ }
+        return out;
       }
-      const fileTreeString = buildFileList(wsRoot) || '(empty project)';
+
+      const allFiles = walkFiles(wsRoot);
+      const fileTreeString = allFiles.length
+        ? allFiles.map(f => f.rel).sort().join('\n')
+        : '(empty project)';
+
+      let inlined = '';
+      let inlinedCount = 0;
+      let remainingBudget = TOTAL_INLINE_BYTES;
+      const skippedFiles = [];
+      for (const f of allFiles.sort((a, b) => a.rel.localeCompare(b.rel))) {
+        if (BINARY_EXT.test(f.rel)) { skippedFiles.push(`${f.rel} (binary)`); continue; }
+        let content;
+        try {
+          let stat;
+          try { stat = statSync(f.abs); } catch { stat = null; }
+          if (!stat || stat.size > PER_FILE_BYTES * 4) {
+            skippedFiles.push(`${f.rel} (too large: ${stat?.size ?? '?'} bytes)`);
+            continue;
+          }
+          content = readFileSync(f.abs, 'utf-8');
+        } catch { skippedFiles.push(`${f.rel} (unreadable)`); continue; }
+        const truncated = content.length > PER_FILE_BYTES;
+        const body = truncated ? content.slice(0, PER_FILE_BYTES) + '\n…[truncated]' : content;
+        const block = `\n=== FILE: ${f.rel} ===\n${body}\n`;
+        if (block.length > remainingBudget) {
+          skippedFiles.push(`${f.rel} (budget exhausted)`);
+          continue;
+        }
+        inlined += block;
+        remainingBudget -= block.length;
+        inlinedCount += 1;
+      }
+      const skippedNote = skippedFiles.length
+        ? `\n\nFILES NOT INLINED (still in tree — ask the user if you need them):\n${skippedFiles.slice(0, 20).join('\n')}`
+        : '';
 
       const systemPrompt = `You are CoderAgent, an expert software engineer integrated with an IDE.
 You write production-quality code and directly create/modify files in the user's project.
 
-CURRENT PROJECT FILES:
+CURRENT PROJECT FILE TREE:
 ${fileTreeString}
 
-IMPORTANT: When writing or modifying code, ALWAYS use filename-tagged code blocks:
+CURRENT FILE CONTENTS (${inlinedCount} file${inlinedCount === 1 ? '' : 's'}):
+${inlined || '(no text files available)'}${skippedNote}
+
+TWO WAYS TO WRITE FILES — pick the right one based on what you're doing:
+
+(A) **SEARCH/REPLACE edit blocks** — for modifying EXISTING files. NEVER use this shape for new files (there's nothing to search for). Format EXACTLY:
+
+===== EDIT: path/to/file.ext =====
+<<<<<<< SEARCH
+<exact existing text — must appear exactly ONCE in the file>
+=======
+<replacement text>
+>>>>>>> REPLACE
+
+The three markers — "<<<<<<< SEARCH", "=======", ">>>>>>> REPLACE" — are MANDATORY. A block that just has "===== EDIT: path =====" followed by a plain code fence is NOT a SEARCH/REPLACE edit — use form (B) instead for that case.
+
+**Creating a new file with SEARCH/REPLACE**: leave the SEARCH section EMPTY (nothing between "<<<<<<< SEARCH" and "=======") and put the full new file content in REPLACE. This is the cleanest way to create new files inside an EDIT block series.
+
+Rules for SEARCH/REPLACE:
+- SEARCH must match the current file CHARACTER-FOR-CHARACTER including whitespace and blank lines.
+- SEARCH must be unique in the file. If it isn't, expand it with more surrounding lines until it is.
+- Emit multiple edit blocks for the same file if you have multiple changes — each is applied in order.
+- If an edit fails (SEARCH not found, or not unique), the server will reject only that edit; others still apply.
+
+(B) **Full-file tagged blocks** — use ONLY for NEW files or when you're replacing >50% of a file:
 \`\`\`language:path/to/file.ext
-code here
+<complete file content — every line the final file should contain>
 \`\`\`
 
-For example:
-\`\`\`javascript:src/index.js
-console.log('hello');
-\`\`\`
+CRITICAL RULES (violating these loses user data):
+1. A filename-tagged code block OVERWRITES the target file with exactly what's between the fences. Never emit one containing placeholder text, ellipses, "…rest of file", or anything other than the final real content.
+2. If you do NOT have enough information to produce the COMPLETE real content of a file (e.g. the file is in the "FILES NOT INLINED" list above), DO NOT emit a tagged code block for it. Use SEARCH/REPLACE instead, or ask the user.
+3. Untagged code fences are fine for examples or snippets — those are NOT saved.
 
-Every filename-tagged code block will be automatically saved to the project.
-Use regular (untagged) code blocks for examples or snippets that shouldn't be saved.
-When modifying existing files, include the COMPLETE file content, not just changes.`;
+CONCRETE EXAMPLE:
+User asks to double the asteroid size. Instead of rewriting the whole file, emit:
+
+===== EDIT: Arcade/asteroids.js =====
+<<<<<<< SEARCH
+const ASTEROID_SIZE = 30;
+=======
+const ASTEROID_SIZE = 60;
+>>>>>>> REPLACE
+
+RESPONSE FORMAT:
+- ALWAYS begin with a short prose explanation of what you're doing and why.
+- Then emit any filename-tagged code blocks with the full file contents.
+- Then end with a one-sentence summary of what changed.
+- Never respond with ONLY a code block and no surrounding text — the user needs context.
+
+SCOPE LIMIT: SEARCH/REPLACE edits are cheap — emit as many as you like across as many files as you like in a single response. Only the FULL-FILE tagged block form is expensive; if you need to do a full-file rewrite, do AT MOST ONE per response and end with:
+
+    > Done with <filename>. Reply "continue" and I'll do <next file>.
+
+Then WAIT for the user to say "continue" before doing the next full rewrite.`;
 
       // Resolve or create conversation
       let convId = conversationId;
@@ -463,35 +572,240 @@ When modifying existing files, include the COMPLETE file content, not just chang
       const messages = buildMessages(systemPrompt, history, content);
       let fullResponse = '';
 
+      // Abort the stream if the client stays disconnected past a grace period.
+      // Brief socket blips (laptop sleep, Wi-Fi wobble) shouldn't throw away
+      // expensive generation — but a truly-gone client shouldn't keep the
+      // model running for 10 minutes either. 15s balances both.
+      userAbort = new AbortController();
+      onDisconnect = () => {
+        if (disconnectTimer) return;
+        disconnectTimer = setTimeout(() => {
+          console.log(`[CoderAgent] aborting stream — socket ${socket.id} disconnected >15s`);
+          try { userAbort.abort(); } catch { /* ignore */ }
+        }, 15_000);
+      };
+      socket.once('disconnect', onDisconnect);
+
       const stream = streamCompletion(modelCfg.endpoint, modelCfg.model, messages, {
-        signal: AbortSignal.timeout(modelCfg.timeout),
+        signal: AbortSignal.any([AbortSignal.timeout(modelCfg.timeout), userAbort.signal]),
         onThinking: () => socket.emit('thinking', {}),
+        // Force Ollama native /api/chat with think:false so thinking-family
+        // models (Qwen3.6, Qwen3 hybrid) don't burn their budget on internal
+        // reasoning and emit actual content. The /v1 path doesn't reliably
+        // suppress reasoning for these models.
+        noThink: true,
+        // Output cap — 16k tokens covers a full-file rewrite of roughly
+        // 45 KB + explanation. With SEARCH/REPLACE edits the agent hardly
+        // touches this ceiling, but it's here for big rewrites + "continue"
+        // follow-ups. At ~35 tok/s that's up to ~7 min per turn.
+        // Context = input + output combined; 40960 is qwen3's trained max.
+        maxTokens: 16384,
+        numCtx: 40960,
       });
 
+      let contentTokenCount = 0;
       for await (const token of stream) {
         fullResponse += token;
+        contentTokenCount += 1;
         socket.emit('code:token', { token });
       }
 
-      // Parse and save tagged code blocks
+      // Guard: if the model returned nothing (all-reasoning, no content),
+      // surface something in the chat so the user isn't staring at a blank
+      // bubble. Previously this failure mode was silent.
+      if (contentTokenCount === 0) {
+        const fallback = '_The model finished with no visible output. This usually means it spent its budget on internal reasoning without producing a reply. Try rephrasing, or ask it to be more concise._';
+        fullResponse = fallback;
+        for (const ch of fallback.match(/.{1,4}/g) || []) {
+          socket.emit('code:token', { token: ch });
+        }
+        console.warn('[CoderAgent] empty content response — emitted fallback');
+      }
+      console.log(`[CoderAgent] response: ${fullResponse.length} chars, ${contentTokenCount} tokens`);
+
+      // === "EDIT header + plain code fence" full-file shape ===
+      // Some models (including Qwen3.6) emit:
+      //   ===== EDIT: path/to/file =====
+      //   ```lang
+      //   <full file contents>
+      //   ```
+      // This isn't SEARCH/REPLACE and isn't a filename-tagged fence, so the
+      // two real parsers miss it. Rewrite the response to convert these into
+      // canonical filename-tagged fences BEFORE running the other parsers.
+      fullResponse = fullResponse.replace(
+        /=====\s*EDIT:\s*([^\n=]+?)\s*=====\s*\r?\n```(\w+)\r?\n([\s\S]*?)```/g,
+        (_m, p, lang, body) => '```' + lang + ':' + p.trim() + '\n' + body + '```',
+      );
+
+      // Parse SEARCH/REPLACE edit blocks with a line-based state machine —
+      // regex was too fragile: if SEARCH was empty ("create new file" intent)
+      // the regex matched greedily across multiple adjacent blocks and
+      // corrupted the parsed path/content.
+      //
+      // Accepted formats:
+      //   ===== EDIT: path =====
+      //   <<<<<<< SEARCH
+      //   <existing text — empty = "create this file">
+      //   =======
+      //   <replacement text>
+      //   >>>>>>> REPLACE
+      const editBlocks = parseEditBlocks(fullResponse);
+      const editResults = [];
+      for (const block of editBlocks) {
+        const editPath = String(block.path).trim().replace(/\.\./g, '').replace(/^\//, '');
+        if (!editPath) continue;
+        const absEditPath = join(wsRoot, editPath);
+        const searchEmpty = block.search.trim() === '';
+
+        // Empty SEARCH → create/overwrite-empty semantics. Refuse if an
+        // existing non-trivial file is there (ambiguous intent).
+        if (searchEmpty) {
+          let existingSize = null;
+          try { existingSize = statSync(absEditPath).size; } catch { /* new file */ }
+          if (existingSize !== null && existingSize > 20) {
+            editResults.push({ path: editPath, ok: false, reason: `file exists (${existingSize} bytes) — use a real SEARCH to edit it` });
+            continue;
+          }
+          if (block.replace.trim().length === 0) {
+            editResults.push({ path: editPath, ok: false, reason: 'both SEARCH and REPLACE empty — nothing to do' });
+            continue;
+          }
+          try {
+            mkdirSync(dirname(absEditPath), { recursive: true });
+            writeFileSync(absEditPath, block.replace);
+            editResults.push({ path: editPath, ok: true, sizeDelta: block.replace.length });
+            socket.emit('code:file-written', { path: editPath, language: 'create' });
+            console.log(`[CoderAgent] created ${editPath} (${block.replace.length} bytes)`);
+          } catch (err) {
+            editResults.push({ path: editPath, ok: false, reason: `create failed: ${err.message}` });
+          }
+          continue;
+        }
+
+        // Non-empty SEARCH → edit existing file. File must exist.
+        let current;
+        try { current = readFileSync(absEditPath, 'utf-8'); }
+        catch {
+          editResults.push({ path: editPath, ok: false, reason: 'file does not exist — use an empty SEARCH or a full-file block to create' });
+          continue;
+        }
+        const occurrences = current.split(block.search).length - 1;
+        if (occurrences === 0) {
+          editResults.push({ path: editPath, ok: false, reason: 'SEARCH text not found (whitespace or indentation may differ)' });
+          continue;
+        }
+        if (occurrences > 1) {
+          editResults.push({ path: editPath, ok: false, reason: `SEARCH text matched ${occurrences} times — include more context to make it unique` });
+          continue;
+        }
+        const updated = current.replace(block.search, block.replace);
+        try {
+          writeFileSync(absEditPath, updated);
+          editResults.push({ path: editPath, ok: true, sizeDelta: updated.length - current.length });
+          socket.emit('code:file-written', { path: editPath, language: 'edit' });
+          console.log(`[CoderAgent] edited ${editPath} (${updated.length - current.length} byte delta)`);
+        } catch (err) {
+          editResults.push({ path: editPath, ok: false, reason: `write failed: ${err.message}` });
+        }
+      }
+      if (editResults.length) {
+        const ok = editResults.filter(r => r.ok).length;
+        const failed = editResults.filter(r => !r.ok);
+        console.log(`[CoderAgent] edits: ${ok} applied, ${failed.length} failed`);
+        if (failed.length) {
+          for (const f of failed) console.warn(`[CoderAgent] edit SKIPPED ${f.path} — ${f.reason}`);
+          socket.emit('code:edits-failed', { failures: failed });
+        }
+      }
+
+      // Parse and save filename-tagged (full-file) code blocks.
+      // Safety rails (prevent data loss — a hallucinating model emitting
+      // empty/placeholder blocks will NOT clobber real code):
+      //   1. Skip if body is empty/whitespace-only.
+      //   2. Skip if body contains obvious placeholder patterns ("…rest of
+      //      file", "// ...existing code...", etc).
+      //   3. Skip if writing would replace a file >200 bytes with content
+      //      under 20 bytes — almost always a hallucination.
       const codeBlockRe = /```(\w+):([^\n]+)\n([\s\S]*?)```/g;
+      const PLACEHOLDER_PATTERNS = [
+        /^[\s\n]*(\/\/|#|\/\*)\s*\.\.\.?\s*(rest|existing|the rest|prior|previous|original)\b/im,
+        /\b(?:rest|remainder) of (?:the )?(?:file|code|contents)\b/i,
+        /\.\.\.\s*existing\s+code\s*\.\.\./i,
+        /^[\s\n]*<\s*(?:placeholder|same as before|omitted)\s*>\s*$/im,
+      ];
       let match;
+      const skippedWrites = [];
       while ((match = codeBlockRe.exec(fullResponse)) !== null) {
-        const [, language, filePath, code] = match;
-        const safePath = filePath.replace(/\.\./g, '').replace(/^\//, '');
+        const [, language, filePathRaw, code] = match;
+        const safePath = String(filePathRaw).trim().replace(/\.\./g, '').replace(/^\//, '');
+        if (!safePath) continue;
         const absPath = join(wsRoot, safePath);
+        const trimmedLen = code.trim().length;
+
+        if (trimmedLen === 0) {
+          skippedWrites.push({ path: safePath, reason: 'empty body' });
+          continue;
+        }
+        if (PLACEHOLDER_PATTERNS.some(re => re.test(code))) {
+          skippedWrites.push({ path: safePath, reason: 'placeholder / "rest of file" marker' });
+          continue;
+        }
+        let existingSize = null;
+        try { existingSize = statSync(absPath).size; } catch { /* new file */ }
+        if (existingSize !== null && existingSize > 200 && trimmedLen < 20) {
+          skippedWrites.push({ path: safePath, reason: `refusing to shrink ${existingSize}B file to ${trimmedLen}B` });
+          continue;
+        }
+
         mkdirSync(dirname(absPath), { recursive: true });
         writeFileSync(absPath, code);
         socket.emit('code:file-written', { path: safePath, language });
-        console.log(`[CoderAgent] wrote ${safePath}`);
+        console.log(`[CoderAgent] wrote ${safePath} (${code.length} bytes)`);
+      }
+      if (skippedWrites.length) {
+        for (const s of skippedWrites) {
+          console.warn(`[CoderAgent] SKIPPED write to ${s.path} — ${s.reason}`);
+        }
+        socket.emit('code:writes-skipped', { skipped: skippedWrites });
       }
 
       stmts.insertMessage.run(convId, 'assistant', 'CoderAgent', fullResponse);
       stmts.touchConversation.run(convId);
-      socket.emit('code:done', {});
+      onReconnectCancel();
+      socket.off('disconnect', onDisconnect);
+
+      if (socket.connected) {
+        socket.emit('code:done', {});
+      } else {
+        // Original socket is gone (brief reconnect, or they left entirely).
+        // Push the final result to any OTHER live socket for the same user so
+        // when their frontend re-attaches, they see what got saved instead of
+        // a frozen half-streamed bubble. Files are already on disk.
+        try {
+          const writtenFiles = [];
+          const re2 = /```(\w+):([^\n]+)\n([\s\S]*?)```/g;
+          let m2;
+          while ((m2 = re2.exec(fullResponse)) !== null) {
+            const p = m2[2].trim().replace(/\.\./g, '').replace(/^\//, '');
+            if (p) writtenFiles.push(p);
+          }
+          for (const [, otherSock] of io.sockets.sockets) {
+            if (otherSock.id !== socket.id && otherSock.user?.id === socket.user.id && otherSock.connected) {
+              otherSock.emit('code:catchup', {
+                conversationId: convId,
+                content: fullResponse,
+                writtenFiles,
+              });
+            }
+          }
+        } catch (e) { console.warn('[CoderAgent] catchup emit failed:', e.message); }
+      }
     } catch (err) {
-      console.error('[CoderAgent code:message] error:', err.message);
-      socket.emit('code:error', { message: err.message });
+      onReconnectCancel();
+      if (onDisconnect) socket.off('disconnect', onDisconnect);
+      const aborted = !!(userAbort && userAbort.signal.aborted);
+      console.error(`[CoderAgent code:message] ${aborted ? 'aborted by disconnect' : 'error'}:`, err?.message || err);
+      if (socket.connected) socket.emit('code:error', { message: aborted ? 'Cancelled (you disconnected)' : (err?.message || 'unknown error') });
     }
   });
 
@@ -640,6 +954,48 @@ When modifying existing files, include the COMPLETE file content, not just chang
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Line-based parser for CoderAgent SEARCH/REPLACE edit blocks.
+ * Returns an array of { path, search, replace } — each is a plain string
+ * (lines rejoined with \n). Blocks that don't complete cleanly are skipped.
+ *
+ * Robust against: adjacent blocks, empty SEARCH (means "create"), arbitrary
+ * content inside SEARCH/REPLACE (including lines that look like markers IF
+ * they're not equal to a marker exactly — we use ===-equality per line).
+ */
+function parseEditBlocks(text) {
+  const lines = String(text || '').split(/\r?\n/);
+  const blocks = [];
+  let state = 'idle'; // 'idle' | 'expect-search' | 'in-search' | 'in-replace'
+  let current = null;
+  const HEADER = /^=====\s*EDIT:\s*(.+?)\s*=====\s*$/;
+  for (const line of lines) {
+    if (state === 'idle') {
+      const m = line.match(HEADER);
+      if (m) { current = { path: m[1], search: [], replace: [] }; state = 'expect-search'; }
+    } else if (state === 'expect-search') {
+      if (line === '<<<<<<< SEARCH') state = 'in-search';
+      else if (line.match(HEADER)) { current = { path: line.match(HEADER)[1], search: [], replace: [] }; }
+      else { state = 'idle'; current = null; }
+    } else if (state === 'in-search') {
+      if (line === '=======') state = 'in-replace';
+      else current.search.push(line);
+    } else if (state === 'in-replace') {
+      if (line === '>>>>>>> REPLACE') {
+        blocks.push({
+          path: current.path,
+          search: current.search.join('\n'),
+          replace: current.replace.join('\n'),
+        });
+        current = null; state = 'idle';
+      } else {
+        current.replace.push(line);
+      }
+    }
+  }
+  return blocks;
+}
 
 function buildMessages(systemPrompt, history, userContent) {
   const messages = [];
@@ -1032,10 +1388,15 @@ for (const id of ['AlertAgent','AnalystAgent','ClientBriefAgent','DemoAgent','De
 // Tracks how many times we've auto-re-invoked MailAgent for a conversation
 // after an approval resolved. Capped per-conv to prevent runaway loops.
 const _mailContinuationDepth = new Map(); // convId → count
+const _mailContinuationInFlight = new Set(); // convIds currently running
 const MAX_MAIL_CONTINUATION_DEPTH = 3;
 
 async function maybeAutoContinueMailAgent(socket, convId, lastSummary) {
   if (!convId) return;
+  // Guard against concurrent continuations: when the user hits "Approve all"
+  // 18 resolutions fire near-simultaneously, each would observe remaining=0
+  // after its own update and try to continue. Only the first wins.
+  if (_mailContinuationInFlight.has(convId)) return;
   // If another approval for this conversation is still pending, the agent
   // isn't ready to move to the next phase yet — wait for those to resolve.
   const remaining = stmts.listPendingApprovals.all(socket.user.id)
@@ -1050,6 +1411,7 @@ async function maybeAutoContinueMailAgent(socket, convId, lastSummary) {
   const depth = _mailContinuationDepth.get(convId) || 0;
   if (depth >= MAX_MAIL_CONTINUATION_DEPTH) return;
   _mailContinuationDepth.set(convId, depth + 1);
+  _mailContinuationInFlight.add(convId);
 
   // Fetch the REAL executed actions for this conversation so the continuation
   // sees concrete message IDs to operate on. Without this, the model will
@@ -1088,6 +1450,7 @@ ${resolvedSummary || '(none)'}
 Now pick up where you left off. If the original request was compound ("unsubscribe from X then trash them", "reply to A and forward to B"), the earlier phase is done — emit plan_mutations NOW for the next phase, targeting the SAME items by their exact message_id / account_id from the list above. If the original request is fully complete, say so in one short sentence and stop. Do not re-emit actions that are already in the executed list.`,
     });
   } finally {
+    _mailContinuationInFlight.delete(convId);
     // Reset depth once no further continuations fire — we cap runaway loops
     // but we don't want a stale counter blocking future compound asks.
     setTimeout(() => {

@@ -200,6 +200,21 @@ export function socketAuth(socket, next) {
   }
 }
 
+/**
+ * Resolve a user from a raw Node request (cookie header only). Returns the
+ * hydrated user or null. Used by the server's `upgrade` event handler —
+ * WebSocket upgrades don't go through Express middleware so we auth manually.
+ */
+export function userFromRequest(req) {
+  try {
+    const cookies = parseCookieHeader(req.headers?.cookie);
+    const token = cookies[SESSION_COOKIE];
+    if (!token) return null;
+    const payload = verifySession(token);
+    return hydrateUser(payload) || null;
+  } catch { return null; }
+}
+
 // ── Allowlist check ─────────────────────────────────────────────────
 
 /**

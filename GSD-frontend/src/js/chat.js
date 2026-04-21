@@ -29,7 +29,7 @@ export class Chat {
       el.appendChild(row);
     }
     this.container.appendChild(el);
-    this._scrollToBottom();
+    this._scrollToBottom(true);
   }
 
   /** Start a streaming assistant bubble. Returns the element. */
@@ -39,7 +39,7 @@ export class Chat {
     this._streamEl = el.querySelector('.bubble-content');
     this._thinkingEl = el.querySelector('.thinking-indicator');
     this.container.appendChild(el);
-    this._scrollToBottom();
+    this._scrollToBottom(true);
     return el;
   }
 
@@ -90,7 +90,7 @@ export class Chat {
     if (role === 'assistant') this._addOpenInEditorButtons(el.querySelector('.bubble-content'));
     this.container.appendChild(el);
     this._renderMermaid();
-    this._scrollToBottom();
+    this._scrollToBottom(true);
   }
 
   /** Show an inline error message in the chat. */
@@ -99,7 +99,7 @@ export class Chat {
     el.className = 'msg-error';
     el.textContent = `Error: ${text}`;
     this.container.appendChild(el);
-    this._scrollToBottom();
+    this._scrollToBottom(true);
   }
 
   /** Show a system / status message (e.g. "Routed to CoderAgent"). */
@@ -108,7 +108,7 @@ export class Chat {
     el.className = 'msg-status';
     el.textContent = text;
     this.container.appendChild(el);
-    this._scrollToBottom();
+    this._scrollToBottom(true);
   }
 
   /** Clear all messages and history. */
@@ -240,7 +240,18 @@ export class Chat {
       .replace(/"/g, '&quot;');
   }
 
-  _scrollToBottom() {
+  // If `force` is true (user-initiated actions: sending a message, starting
+  // a fresh stream, status/error messages), always snap to bottom. For
+  // passive updates like streamed tokens, only snap if the user is already
+  // near the bottom — otherwise we steal their scroll position while they're
+  // reading something above (e.g. an approval card that just filled in).
+  _scrollToBottom(force = false) {
+    if (!force && !this._isNearBottom()) return;
     this.container.scrollTop = this.container.scrollHeight;
+  }
+
+  _isNearBottom(threshold = 120) {
+    const el = this.container;
+    return (el.scrollHeight - el.scrollTop - el.clientHeight) < threshold;
   }
 }

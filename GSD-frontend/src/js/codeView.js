@@ -6,6 +6,7 @@
 import { Editor } from './editor.js';
 import { FileTree } from './fileTree.js';
 import { Terminal } from './terminal.js';
+import { GitPanel } from './gitPanel.js';
 import { isSupported as voiceSupported, createRecognition, speak, stopSpeaking, isSpeaking } from './voice.js';
 import { fetchJson } from './auth.js';
 
@@ -46,6 +47,16 @@ export class CodeView {
     this._terminal.clear();
     this._terminal.appendOutput(`Loaded project: ${projectName}`);
     await this._fileTree.load(projectId);
+    if (this._gitPanel) this._gitPanel.setProjectId(projectId);
+    // Project-type detection — show LÖVE export button only when relevant,
+    // and drop a hint in the terminal so the user knows what the IDE saw.
+    try {
+      const detect = await this._apiFetch(`/workspace/${projectId}/detect`);
+      if (detect?.type) {
+        this._terminal.appendOutput(`Detected: ${detect.type}${detect.note ? ' — ' + detect.note : ''}`);
+      }
+      this._loveBtn.hidden = detect?.type !== 'love';
+    } catch { this._loveBtn.hidden = true; }
   }
 
   /** Show/hide the code view. */
@@ -98,12 +109,23 @@ export class CodeView {
     this._previewBtn = this._el('button', 'preview-btn', 'Preview');
     this._previewBtn.disabled = true;
     this._envBtn = this._el('button', 'env-btn', 'Env Vars');
+    this._saveBtn = this._el('button', 'save-btn', 'Save');
+    this._saveBtn.title = 'Save the active editor tab (Ctrl/Cmd+S)';
+    this._saveBtn.disabled = true;
+    this._saveBtn.addEventListener('click', () => this._editor?.saveActive());
+    this._exportBtn = this._el('button', 'export-btn', 'Download ZIP');
+    this._exportBtn.title = 'Download the project as a ZIP (excludes node_modules, .git, dist, .env*)';
+    this._exportBtn.addEventListener('click', () => this._downloadProjectZip());
+    this._loveBtn = this._el('button', 'love-btn', 'Export .love');
+    this._loveBtn.title = 'Package as a LÖVE .love file (main.lua must exist at project root)';
+    this._loveBtn.hidden = true;
+    this._loveBtn.addEventListener('click', () => this._downloadLove());
 
     // Services status bar (shown below toolbar when compose is running)
     this._servicesBar = this._el('div', 'services-bar');
     this._servicesBar.hidden = true;
 
-    [this._projectSelect, this._newProjectBtn, this._runBtn, this._restartBtn, this._stopBtn, this._previewBtn, this._envBtn, termToggle].forEach(c => toolbar.appendChild(c));
+    [this._projectSelect, this._newProjectBtn, this._runBtn, this._restartBtn, this._stopBtn, this._previewBtn, this._envBtn, this._saveBtn, this._exportBtn, this._loveBtn, termToggle].forEach(c => toolbar.appendChild(c));
     this._wrap.appendChild(toolbar);
     this._wrap.insertBefore(this._servicesBar, this._wrap.children[1]);
 
@@ -136,10 +158,35 @@ export class CodeView {
     this._wrap.appendChild(layout);
     this._root.appendChild(this._wrap);
 
+    // Sidebar tabs: Files | Git. Each tab swaps which pane is visible.
+    this._sidebarTabs = this._el('div', 'sidebar-tabs');
+    const filesTab = this._el('div', 'sidebar-tab active', 'Files');
+    const gitTab = this._el('div', 'sidebar-tab', 'Git');
+    this._sidebarTabs.append(filesTab, gitTab);
+    this._filesPane = this._el('div', 'sidebar-pane');
+    this._gitPane = this._el('div', 'sidebar-pane hidden');
+    this._sidebarDiv.style.display = 'flex';
+    this._sidebarDiv.style.flexDirection = 'column';
+    this._sidebarDiv.append(this._sidebarTabs, this._filesPane, this._gitPane);
+    const switchTab = (which) => {
+      filesTab.classList.toggle('active', which === 'files');
+      gitTab.classList.toggle('active', which === 'git');
+      this._filesPane.classList.toggle('hidden', which !== 'files');
+      this._gitPane.classList.toggle('hidden', which !== 'git');
+      if (which === 'git' && this._gitPanel) this._gitPanel.refresh();
+    };
+    filesTab.addEventListener('click', () => switchTab('files'));
+    gitTab.addEventListener('click', () => switchTab('git'));
+
     // Create sub-components
     this._editor = new Editor(this._editorDiv);
-    this._fileTree = new FileTree(this._sidebarDiv);
+    this._fileTree = new FileTree(this._filesPane);
     this._terminal = new Terminal(this._terminalDiv);
+    this._gitPanel = new GitPanel(this._gitPane, {
+      apiFetch: (path, opts) => this._apiFetch(path, opts),
+      editor: this._editor,
+      terminal: this._terminal,
+    });
     // Intercept terminal output so CoderAgent can see it
     const origAppend = this._terminal.appendOutput.bind(this._terminal);
     this._terminal.appendOutput = (text) => {
@@ -206,16 +253,31 @@ export class CodeView {
       }
     });
 
-    // Ctrl+S → save file
+    // Ctrl+S (or Save button) → persist active tab
     this._editor.onSave(async ({ path, content }) => {
       try {
         await this._apiFetch(
           `/workspace/${this._projectId}/file?path=${encodeURIComponent(path)}`,
           { method: 'PUT', body: JSON.stringify({ content }) }
         );
+        this._editor.markClean(path);
         this._terminal.appendOutput(`Saved: ${path}`);
+        this._gitPanel?.refresh();
       } catch (err) {
         this._terminal.appendOutput(`Save failed: ${err.message}`);
+      }
+    });
+
+    // Reflect editor dirty state in the Save button (enabled iff there's
+    // something to save on the active tab). Also updates label to show how
+    // many other tabs have unsaved changes — quick glance for the user.
+    this._editor.onDirtyChange((dirtyPaths) => {
+      const activeDirty = dirtyPaths.includes(this._editor.getActivePath());
+      this._saveBtn.disabled = !activeDirty;
+      if (dirtyPaths.length > 1) {
+        this._saveBtn.textContent = `Save (${dirtyPaths.length} dirty)`;
+      } else {
+        this._saveBtn.textContent = activeDirty ? 'Save •' : 'Save';
       }
     });
 
@@ -346,12 +408,21 @@ export class CodeView {
       });
 
       this._socket.socket.on('code:file-written', async ({ path, language }) => {
-        this._terminal.appendOutput(`Auto-saved: ${path}`);
+        const tag = language === 'edit' ? 'Edited' : 'Auto-saved';
+        this._terminal.appendOutput(`${tag}: ${path}`);
         await this._fileTree.refresh();
         try {
           const data = await this._apiFetch(`/workspace/${this._projectId}/file?path=${encodeURIComponent(path)}`);
           this._editor.openFile(path, (data && data.content) || '');
         } catch { /* ignore */ }
+        this._gitPanel?.refresh();
+      });
+
+      this._socket.socket.on('code:edits-failed', ({ failures }) => {
+        if (!Array.isArray(failures) || !failures.length) return;
+        for (const f of failures) {
+          this._terminal.appendOutput(`Edit NOT applied — ${f.path}: ${f.reason}`);
+        }
       });
 
       this._socket.socket.on('code:done', () => {
@@ -369,6 +440,24 @@ export class CodeView {
         this._addChatBubble('error', message);
         this._chatStreamEl = null; this._chatStreamBuffer = '';
         this._chatSendBtn.disabled = false; this._chatInput.disabled = false;
+      });
+
+      // Catch-up from a prior run whose streaming socket got disconnected.
+      // Surface the saved result so the user knows what finished offscreen.
+      this._socket.socket.on('code:catchup', async ({ content, writtenFiles }) => {
+        const header = writtenFiles && writtenFiles.length
+          ? `Previous request finished while you were disconnected. Files saved: ${writtenFiles.join(', ')}`
+          : 'Previous request finished while you were disconnected.';
+        this._addChatBubble('status', header);
+        if (content) {
+          const el = this._addChatBubble('assistant', '');
+          if (window.marked) el.innerHTML = marked.parse(content);
+          else el.textContent = content;
+        }
+        this._chatStreamEl = null; this._chatStreamBuffer = '';
+        this._chatSendBtn.disabled = false; this._chatInput.disabled = false;
+        await this._fileTree?.refresh();
+        this._gitPanel?.refresh();
       });
     }
   }
@@ -423,6 +512,19 @@ export class CodeView {
         this._terminal.appendOutput('Found Dockerfile — building image...');
         this._socket.socket.emit('build:start', { projectId: this._projectId });
         // build:done handler will auto-call _runContainerWithImage
+      } else if (info.type === 'love') {
+        this._setBusy(true, 'Starting LÖVE runner...');
+        this._terminal.appendOutput('Starting LÖVE in a container with noVNC… first run builds the image (~60s).');
+        try {
+          const run = await this._apiFetch(`/workspace/${this._projectId}/love/run`, { method: 'POST' });
+          this._loveContainerId = run.containerId;
+          this._openLovePreview(run.url);
+          this._setRunning(true);
+          this._terminal.appendOutput(`LÖVE running — preview opened in browser. Click Stop to terminate.`);
+        } catch (err) {
+          this._terminal.appendOutput(`LÖVE run failed: ${err.message}`);
+          this._setRunning(false);
+        }
       } else {
         // node, python, go, unknown — use base image + auto-install + auto-start
         const image = info.image || 'node:20-slim';
@@ -496,10 +598,57 @@ export class CodeView {
       } catch { /* ignore */ }
       this._containerId = null;
     }
+    if (this._loveContainerId) {
+      try {
+        await this._apiFetch(`/workspace/${this._projectId}/love/stop`, {
+          method: 'POST', body: JSON.stringify({ containerId: this._loveContainerId }),
+        });
+      } catch { /* ignore */ }
+      this._loveContainerId = null;
+      this._closeLovePreview();
+    }
     this._setRunning(false);
     this._composeMode = false;
     this._composeServices = [];
     this._servicesBar.hidden = true;
+  }
+
+  _openLovePreview(url) {
+    // Overlay an iframe over the editor area — closed when Stop is clicked.
+    this._closeLovePreview();
+    const wrap = document.createElement('div');
+    wrap.className = 'love-preview-wrap';
+    wrap.style.cssText = 'position:absolute;inset:0;z-index:6;background:#000;display:flex;flex-direction:column;';
+    const header = document.createElement('div');
+    header.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 8px;background:#252526;color:#ddd;font-size:12px;border-bottom:1px solid #333;';
+    const title = document.createElement('span');
+    title.textContent = 'LÖVE (noVNC) — use keyboard + mouse to play';
+    title.style.flex = '1';
+    const popOut = document.createElement('button');
+    popOut.textContent = 'Open in tab';
+    popOut.style.cssText = 'padding:2px 8px;background:#3c3c3c;color:#eee;border:1px solid #5a5a5a;border-radius:3px;cursor:pointer;';
+    popOut.addEventListener('click', () => window.open(url, '_blank', 'noopener'));
+    const closeBtn = document.createElement('button');
+    closeBtn.textContent = 'Hide';
+    closeBtn.style.cssText = popOut.style.cssText;
+    closeBtn.title = 'Hide the preview iframe (game keeps running — use Stop to terminate)';
+    closeBtn.addEventListener('click', () => this._closeLovePreview());
+    header.append(title, popOut, closeBtn);
+    const iframe = document.createElement('iframe');
+    iframe.src = url;
+    iframe.style.cssText = 'flex:1;border:0;background:#000;';
+    iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
+    wrap.append(header, iframe);
+    this._editorDiv.style.position = 'relative';
+    this._editorDiv.appendChild(wrap);
+    this._lovePreviewEl = wrap;
+  }
+
+  _closeLovePreview() {
+    if (this._lovePreviewEl) {
+      this._lovePreviewEl.remove();
+      this._lovePreviewEl = null;
+    }
   }
 
   async _restartProject() {
@@ -565,6 +714,35 @@ export class CodeView {
       window.open(`http://${window.location.hostname}:${port}`, '_blank');
     }
     this._terminal.appendOutput(`Preview opened: port ${port}`);
+  }
+
+  _downloadProjectZip() {
+    if (!this._projectId) { this._terminal.appendOutput('Select a project first.'); return; }
+    // Trigger a same-origin download; auth cookies ride along automatically
+    // and the browser handles the file save. Using a hidden <a download> is
+    // kinder than window.location — it doesn't interrupt the current page.
+    const url = `/api/workspace/${this._projectId}/zip`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    this._terminal.appendOutput('Project ZIP download started.');
+  }
+
+  _downloadLove() {
+    if (!this._projectId) { this._terminal.appendOutput('Select a project first.'); return; }
+    const url = `/api/workspace/${this._projectId}/love`;
+    const a = document.createElement('a');
+    a.href = url;
+    a.rel = 'noopener';
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    this._terminal.appendOutput('LÖVE export (.love) download started. Run it with `love <file>` on your local machine.');
   }
 
   async _toggleEnvPanel() {

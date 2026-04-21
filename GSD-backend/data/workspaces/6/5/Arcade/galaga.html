@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Galaga - Arcade</title>
+    <link rel="stylesheet" href="game-styles.css">
+</head>
+<body>
+    <div class="game-container">
+        <div class="game-header">
+            <h1>GALAGA</h1>
+            <button id="back-btn" class="back-btn">← Menu</button>
+        </div>
+        
+        <div class="game-canvas-container">
+            <canvas id="galaga-canvas" width="800" height="600"></canvas>
+        </div>
+        
+        <div class="game-ui">
+            <div class="score-board">
+                <span class="score-item">SCORE: <span id="score">0</span></span>
+                <span class="score-item">LIVES: <span id="lives">3</span></span>
+                <span class="score-item">LEVEL: <span id="level">1</span></span>
+            </div>
+            <div class="controls-hint">
+                Arrow Keys: Move • Space: Shoot • P: Pause
+            </div>
+        </div>
+    </div>
+    
+    <script src="galaga.js"></script>
+</body>
+</html>
