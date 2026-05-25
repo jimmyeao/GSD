@@ -1,4 +1,8 @@
-How it works
+# Alice — Artificial Local Intelligent Compute Engine
+
+A multi-agent, 100% local LLM assistant: routing, code, images, video, mail, and more — running entirely on your hardware.
+
+## How it works
 When you send a prompt, a RouterAgent inspects the request and routes it to the specialist best suited to the task. The specialist streams its response back through Socket.IO so you see tokens as they are generated. All model traffic, embeddings, and conversation history stay on the machine — there is no external API call in the default loop. You can always pick a specific agent from the sidebar if you want to bypass routing.
 The 22 Agents
  
@@ -11,10 +15,10 @@ ClientBriefAgent	Turns raw notes into polished client-facing briefs.	"Write a on
 CoderAgent	Writes, debugs, and refactors production code in any language.	"Write a Python script to parse Intune CSV exports."	Qwen3-Coder 80B (8000)
 DemoAgent	Builds runnable demo scenarios and walk-through scripts.	"Create a demo showing Autopilot enrolment end to end."	Qwen3-Coder 80B (8000)
 DeployAgent	Produces deployment plans, runbooks, and rollout checklists.	"Draft a deployment plan for Defender for Endpoint."	Qwen3-Coder 80B (8000)
-DiagramAgent	Generates Mermaid diagrams for architecture and flows.	"Diagram the GSD request flow from browser to model."	General LLM (8001)
-DocAgent	Writes clear technical documentation and how-to guides.	"Document how to rotate the GSD admin password."	General LLM (8001)
+DiagramAgent	Generates Mermaid diagrams for architecture and flows.	"Diagram the Alice request flow from browser to model."	General LLM (8001)
+DocAgent	Writes clear technical documentation and how-to guides.	"Document how to rotate the Alice admin password."	General LLM (8001)
 GitAgent	Helps with Git workflows, commits, merges, and history.	"Write a commit message for these staged changes."	General LLM (8001)
-HealthAgent	Reports on service health and interprets diagnostics.	"Interpret this systemctl status output for gsd-web."	General LLM (8001)
+HealthAgent	Reports on service health and interprets diagnostics.	"Interpret this systemctl status output for alice-web."	General LLM (8001)
 ImageAgent	Generates images via a local ComfyUI pipeline.	"Generate a dark, minimal hero image for a proposal deck."	ComfyUI (8188)
 InfraAgent	Plans and scripts infrastructure changes for Windows and Linux.	"Script the provisioning of a new Hyper-V VM from a template."	Qwen3-Coder 80B (8000)
 LogWatchAgent	Watches log streams for errors and surfaces likely causes.	"Scan these nginx error logs for the last hour and summarise."	General LLM (8001)
@@ -24,9 +28,9 @@ ReviewAgent	Reviews code for bugs, style, and security issues.	"Review this Powe
  
  
  
-SlideAgent	Produces slide decks in markdown-slides format.	"Build a five-slide intro deck for a GSD client demo."	General LLM (8001)
-TestAgent	Writes unit and integration tests for existing code.	"Write pytest tests for this GSD auth helper."	Qwen3-Coder 80B (8000)
-VideoScriptAgent	Writes scripts and shot lists for short technical videos.	"Write a 90-second video script explaining GSD."	General LLM (8001)
+SlideAgent	Produces slide decks in markdown-slides format.	"Build a five-slide intro deck for a Alice client demo."	General LLM (8001)
+TestAgent	Writes unit and integration tests for existing code.	"Write pytest tests for this Alice auth helper."	Qwen3-Coder 80B (8000)
+VideoScriptAgent	Writes scripts and shot lists for short technical videos.	"Write a 90-second video script explaining Alice."	General LLM (8001)
  
 
 Choosing an Agent
