@@ -1,8 +1,8 @@
 /**
  * Auth — OAuth (Microsoft + Google) with httpOnly-cookie sessions.
  *
- * The session is stored in an httpOnly cookie (gsd_session) that JS cannot
- * read. CSRF protection uses a double-submit cookie (gsd_csrf): JS reads
+ * The session is stored in an httpOnly cookie (alice_session) that JS cannot
+ * read. CSRF protection uses a double-submit cookie (alice_csrf): JS reads
  * that cookie and echoes it back in the X-CSRF-Token header on mutating
  * requests. All fetches are same-origin with credentials: 'include'.
  */
@@ -127,7 +127,7 @@ export async function getProviders() {
 // ── CSRF ──────────────────────────────────────────────────────────────────
 
 /**
- * GET /api/auth/csrf. Ensures the gsd_csrf cookie is set, caches the token.
+ * GET /api/auth/csrf. Ensures the alice_csrf cookie is set, caches the token.
  * Call once on page load before any state-changing fetch.
  */
 export async function primeCsrf() {
@@ -148,7 +148,7 @@ export async function primeCsrf() {
  * (survives navigation), falls back to the cached value from primeCsrf().
  */
 export function getCsrfToken() {
-  const fromCookie = readCookie('gsd_csrf');
+  const fromCookie = readCookie('alice_csrf');
   return fromCookie || _cachedCsrf;
 }
 

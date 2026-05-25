@@ -1,7 +1,7 @@
 /**
- * Socket.IO client wrapper for GSD backend.
+ * Socket.IO client wrapper for Alice backend.
  *
- * Uses same-origin cookie auth — the session cookie (gsd_session) is sent
+ * Uses same-origin cookie auth — the session cookie (alice_session) is sent
  * automatically with the handshake when withCredentials is true.
  *
  * Expected backend events:
