@@ -1044,6 +1044,7 @@ async function enhanceVideoPrompt(userPrompt) {
       content: `You are an expert text-to-video diffusion prompt engineer for short clips (5-10 seconds, LTX-2).
 Rewrite the user's idea as a single dense prompt clause for video generation — NOT a script, NOT a screenplay, NOT a shot list.
 Include: subject + appearance, specific motion/action, camera move (e.g. slow dolly in, static, handheld pan), shot type (wide, medium, close-up), lighting, environment, mood, and a style tag (cinematic, photorealistic, 8k).
+When describing people walking, moving, or in motion, phrase it in WORLD-FRAME terms (e.g. "pedestrians crossing the street", "figure striding forward through the plaza", "businesspeople walking past the camera from left to right") — NOT treadmill phrasing like "people walking" without a path. Combine with the camera move so the subject visibly translates relative to the environment, not just animates in place.
 Do NOT include: dialogue, voiceover, scene numbers, [VISUAL:]/[VOICEOVER:] tags, multiple scenes, narration.
 Return ONLY the improved prompt as one paragraph of comma-separated phrases. No preamble, no quotes, no markdown.`,
     },

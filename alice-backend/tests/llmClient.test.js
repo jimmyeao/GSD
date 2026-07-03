@@ -113,11 +113,11 @@ describe('complete', () => {
   afterEach(() => mock.restoreAll());
 
   it('returns the assistant message content', async () => {
-    // complete() uses the native Ollama /api/chat format
+    // complete() uses the OpenAI-compat /v1/chat/completions format
     globalThis.fetch = mock.fn(async () => ({
       ok: true,
       status: 200,
-      json: async () => ({ message: { content: '  CoderAgent  ' } }),
+      json: async () => ({ choices: [{ message: { content: '  CoderAgent  ' } }] }),
     }));
 
     const result = await complete('http://localhost:8001', 'model', []);

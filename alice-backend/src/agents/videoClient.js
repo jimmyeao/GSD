@@ -48,9 +48,9 @@ function buildT2VWorkflow(prompt) {
     '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'ltx-2-19b-distilled.safetensors' } },
     '2': { class_type: 'LTXAVTextEncoderLoader', inputs: { text_encoder: 'gemma_3_12B_it_fp4_mixed.safetensors', ckpt_name: 'ltx-2-19b-distilled.safetensors', device: 'default' } },
     '3': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['2', 0] } },
-    '4': { class_type: 'CLIPTextEncode', inputs: { text: 'blurry, low quality, watermark, text overlay, still frame', clip: ['2', 0] } },
+    '4': { class_type: 'CLIPTextEncode', inputs: { text: 'blurry, low quality, watermark, text overlay, still frame, static scene, motionless subjects, walking in place, treadmill motion, frozen people, stationary pedestrians', clip: ['2', 0] } },
     '5': { class_type: 'LTXVConditioning', inputs: { positive: ['3', 0], negative: ['4', 0], frame_rate: 24 } },
-    '6': { class_type: 'EmptyLTXVLatentVideo', inputs: { width: 768, height: 512, length: 193, batch_size: 1 } },
+    '6': { class_type: 'EmptyLTXVLatentVideo', inputs: { width: 1280, height: 720, length: 193, batch_size: 1 } },
     '7': { class_type: 'LTXVAudioVAELoader', inputs: { ckpt_name: 'ltx-2-19b-distilled.safetensors' } },
     '8': { class_type: 'LTXVEmptyLatentAudio', inputs: { frames_number: 193, frame_rate: 24, batch_size: 1, audio_vae: ['7', 0] } },
     '9': { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: ['6', 0], audio_latent: ['8', 0] } },
@@ -79,8 +79,8 @@ function buildI2VWorkflow(prompt, imageName) {
   const seed2 = Math.floor(Math.random() * 2 ** 32);
 
   // First pass is half-res, upscaled 2x by LTXVLatentUpsampler
-  const latentW = 480;   // → 960 after upscale
-  const latentH = 272;   // → 544 after upscale
+  const latentW = 640;   // → 1280 after upscale
+  const latentH = 360;   // → 720 after upscale
   const frames = 193;    // ~8 seconds at 24fps (24*8+1)
   const fps = 24;
 
@@ -94,7 +94,7 @@ function buildI2VWorkflow(prompt, imageName) {
 
     // ── Text encoding ───────────────────────────────────────────
     '6':  { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['2', 0] } },
-    '7':  { class_type: 'CLIPTextEncode', inputs: { text: 'pc game, console game, video game, cartoon, childish, ugly', clip: ['2', 0] } },
+    '7':  { class_type: 'CLIPTextEncode', inputs: { text: 'pc game, console game, video game, cartoon, childish, ugly, static scene, motionless subjects, walking in place, treadmill motion, frozen people, stationary pedestrians, no displacement', clip: ['2', 0] } },
     '8':  { class_type: 'LTXVConditioning', inputs: { positive: ['6', 0], negative: ['7', 0], frame_rate: fps } },
 
     // ── Image loading + preprocessing ───────────────────────────
