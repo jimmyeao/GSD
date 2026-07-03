@@ -6,10 +6,85 @@
  *  2. Launches it if not (using the configured venv + command)
  *  3. Frees VRAM after each job completes
  *  4. Shuts down ComfyUI after an idle timeout
+ *
+ * ComfyUI's real checkpoints (LTX-2 video, Flux2 image) need up to ~53GB of
+ * transient memory — far more headroom than the 3 persistent vLLM chat
+ * backends leave free on this unified-memory box. vLLM's sleep-mode was
+ * investigated and ruled out (unreliable on unified memory, dev-only HTTP
+ * surface, open DGX-Spark crash bug) — so instead we fully stop the 3 vLLM
+ * containers before a ComfyUI job and restart them after. Chat agents will
+ * return LLMUnavailableError for the duration; accepted tradeoff since
+ * generation jobs are occasional, not constant, chat traffic.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { config } from './config.js';
+
+// name -> host port, used both for docker stop/start and post-restart health polling.
+const LLM_BACKENDS = {
+  'alice-vllm-general': 8001,
+  'alice-vllm-coder': 8002,
+  'alice-vllm-mail': 8003,
+};
+const LLM_RESTART_HEALTH_TIMEOUT = 180_000; // per-container cap while waking backends back up
+
+function dockerCmd(action, name) {
+  return new Promise((resolve) => {
+    execFile('docker', [action, name], (err) => {
+      if (err) console.warn(`[comfyManager] docker ${action} ${name} failed: ${err.message}`);
+      resolve();
+    });
+  });
+}
+
+async function backendHealthy(port) {
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/models`, { signal: AbortSignal.timeout(3_000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+function waitForBackendHealthy(port) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + LLM_RESTART_HEALTH_TIMEOUT;
+    const check = async () => {
+      if (await backendHealthy(port)) { resolve(); return; }
+      if (Date.now() > deadline) {
+        console.warn(`[comfyManager] backend on port ${port} did not become healthy within timeout`);
+        resolve(); // don't block the rest of the restart sequence on one stuck backend
+        return;
+      }
+      setTimeout(check, 3_000);
+    };
+    check();
+  });
+}
+
+/**
+ * Stop all 3 LLM backend containers to free memory for a ComfyUI job.
+ * Tolerates individual failures (e.g. already stopped) — never throws.
+ */
+async function pauseLLMBackends() {
+  console.log('[comfyManager] pausing LLM backends to free memory for ComfyUI...');
+  await Promise.all(Object.keys(LLM_BACKENDS).map((name) => dockerCmd('stop', name)));
+}
+
+/**
+ * Restart the 3 LLM backend containers, one at a time (mirroring the same
+ * one-at-a-time caution used for initial cold-boot bring-up, since combined
+ * startup memory overshoot is more of a risk than steady-state usage).
+ * Intended to be fire-and-forget from the caller — does not throw.
+ */
+async function resumeLLMBackends() {
+  console.log('[comfyManager] restarting LLM backends...');
+  for (const [name, port] of Object.entries(LLM_BACKENDS)) {
+    await dockerCmd('start', name);
+    await waitForBackendHealthy(port);
+  }
+  console.log('[comfyManager] LLM backends restarted');
+}
 
 // How long to wait after last job before killing ComfyUI (ms)
 const IDLE_TIMEOUT = parseInt(process.env.COMFY_IDLE_TIMEOUT ?? '120000', 10); // 2 min default
@@ -121,6 +196,11 @@ export async function ensureComfyRunning() {
     return;
   }
 
+  // Free memory for ComfyUI's much larger checkpoints before launching —
+  // see the module header comment for why this stops the LLM backends
+  // rather than using vLLM sleep-mode.
+  await pauseLLMBackends();
+
   // Already starting? Wait for the existing launch.
   if (isStarting && startPromise) {
     await startPromise;
@@ -147,6 +227,9 @@ export async function ensureComfyRunning() {
 export async function freeComfyMemory() {
   shutdownComfy();
   console.log('[comfyManager] ComfyUI shut down after job');
+  // Fire-and-forget: the image/video result shouldn't wait on the LLM
+  // backends coming back up. resumeLLMBackends() never throws.
+  resumeLLMBackends();
 }
 
 /**

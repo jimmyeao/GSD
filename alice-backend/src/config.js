@@ -18,6 +18,10 @@ export const config = {
   // If missing AND any mail provider is configured, the server refuses to start.
   mailTokenKey: process.env.MAIL_TOKEN_KEY || null,
 
+  // Bearer token for the LiteLLM gateway in front of vLLM. Unset = no auth
+  // header sent (fine for a direct-to-vLLM endpoint during local dev).
+  llmGatewayKey: process.env.LLM_GATEWAY_KEY || null,
+
   oauth: {
     microsoft: {
       clientId: process.env.MS_CLIENT_ID || '',
@@ -31,25 +35,24 @@ export const config = {
   },
 
   models: {
+    // general/coder/mail all point at the LiteLLM gateway (vLLM behind it)
+    // by default — model names are the LiteLLM aliases defined in
+    // /home/jimmy/litellm/config.yaml, not raw HuggingFace model IDs.
     general: {
-      endpoint: process.env.GENERAL_LLM_URL ?? 'http://localhost:11434',
-      model: process.env.GENERAL_MODEL ?? 'gpt-oss:latest',
-      // Thinking models reason before responding — allow 5 minutes
+      endpoint: process.env.GENERAL_LLM_URL ?? 'http://localhost:4000',
+      model: process.env.GENERAL_MODEL ?? 'alice-general',
       timeout: 300_000,
     },
     coder: {
-      endpoint: process.env.CODER_LLM_URL ?? 'http://localhost:11434',
-      model: process.env.CODER_MODEL ?? 'qwen3-coder-next:latest',
-      // 80B MoE coder may need up to 10 minutes for complex tasks
-      timeout: 600_000,
+      endpoint: process.env.CODER_LLM_URL ?? 'http://localhost:4000',
+      model: process.env.CODER_MODEL ?? 'alice-coder',
+      timeout: 300_000,
     },
-    // MailAgent uses a tool-calling-reliable model. Falls back to the
-    // general endpoint so the same Ollama host serves it.
+    // MailAgent uses a tool-calling-reliable model.
     mail: {
-      endpoint: process.env.MAIL_LLM_URL ?? process.env.GENERAL_LLM_URL ?? 'http://localhost:11434',
-      model: process.env.MAIL_MODEL ?? 'qwen3:32b',
-      // Cold-load + multi-turn tool loops can take a while
-      timeout: 900_000,
+      endpoint: process.env.MAIL_LLM_URL ?? process.env.GENERAL_LLM_URL ?? 'http://localhost:4000',
+      model: process.env.MAIL_MODEL ?? 'alice-mail',
+      timeout: 300_000,
     },
     comfyui: {
       endpoint: process.env.COMFYUI_URL ?? 'http://localhost:8188',

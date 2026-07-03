@@ -430,10 +430,15 @@ Rules:
 Connected accounts: ${accountsList}`;
 
   try {
+    // Reasoning models (Qwen3.6, etc.) burn a few hundred tokens and several
+    // seconds thinking before ever emitting the actual strategy line — 6s/160
+    // tokens was tuned for Ollama's qwen3:32b and is nowhere near enough here.
+    // Still a graceful no-op on failure (see catch below), so it's safe to
+    // give this a generous budget rather than have it fail silently every time.
     const raw = await complete(gen.endpoint, gen.model, [
       { role: 'system', content: systemMsg },
       { role: 'user', content: text },
-    ], { signal: AbortSignal.timeout(6_000), numPredict: 160 });
+    ], { signal: AbortSignal.timeout(20_000), numPredict: 1024 });
     const s = String(raw || '').trim();
     if (s.length < 10) return null;
     // Normalise — keep one line only, strip leading "Strategy:" if duplicated later.
@@ -936,9 +941,10 @@ export async function runMailAgent({ socket, user, content, history = [], convId
       }
 
       // Append the assistant turn so the model can see its own tool invocations.
-      // Ollama's chat API expects `arguments` as an OBJECT on input messages
-      // (not an OpenAI-style JSON string). Stringifying here caused Ollama's
-      // JSON parser to reject the request with 400 "looks like object" errors.
+      // vLLM's OpenAI-compat server validates this against the standard OpenAI
+      // schema, which requires `function.arguments` to be a JSON-encoded
+      // STRING (pydantic rejects an object here with a "string_type" error) —
+      // the opposite of Ollama's native API, which wanted an object.
       messages.push({
         role: 'assistant',
         content: resp.content || '',
@@ -948,8 +954,8 @@ export async function runMailAgent({ socket, user, content, history = [], convId
           function: {
             name: tc.function.name,
             arguments: typeof tc.function.arguments === 'string'
-              ? (() => { try { return JSON.parse(tc.function.arguments); } catch { return {}; } })()
-              : (tc.function.arguments || {}),
+              ? tc.function.arguments
+              : JSON.stringify(tc.function.arguments ?? {}),
           },
         })),
       });

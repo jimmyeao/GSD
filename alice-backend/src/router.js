@@ -337,10 +337,15 @@ Reply with ONLY the agent name — no explanation, no quotes, no other text.
 Agents:
 ${catalog}`;
   try {
+    // Reasoning models can take several seconds to think before answering
+    // even a short classification prompt — 5s (tuned for Ollama's older
+    // non-reasoning routing model) cut this off mid-thought too often.
+    // Falls back to AssistantAgent below on any failure, so a longer timeout
+    // just means more chances to succeed, not a worse failure mode.
     const result = await complete(llmEndpoint, model, [
       { role: 'system', content: systemMsg },
       { role: 'user', content: prompt },
-    ], { signal: AbortSignal.timeout(5000) });
+    ], { signal: AbortSignal.timeout(12_000) });
 
     const raw = result.trim();
     // Exact-match path (model obeyed "reply with ONLY the agent name").
