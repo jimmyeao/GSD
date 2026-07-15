@@ -1016,11 +1016,39 @@ const DEFAULT_NEGATIVE = [
   'low quality', 'low resolution', 'jpeg artifacts', 'watermark', 'signature',
 ].join(', ');
 
+// Reasoning models (Qwen3.6, etc. — see llmClient.js's `complete()`) spend
+// several hundred tokens thinking before ever emitting the actual answer.
+// These three functions used to run against a non-reasoning Ollama model, so
+// 30s/400-500 tokens was plenty; against the current backend that budget was
+// exhausted mid-thought almost every time, silently falling back to the
+// unmodified original prompt via the catch block — which is exactly why the
+// optimiser looked like it had "stopped working" rather than throwing a
+// visible error. Worse than a simple budget problem: verified the model often
+// drafts a perfectly good answer *inside* its reasoning, then spirals into
+// re-drafting/second-guessing itself and never commits the draft to the
+// actual output — burning the whole budget on self-correction with nothing
+// to show. The "do not reconsider/revise" instruction below (appended to
+// every system prompt) fixes that specifically; the bumped budget covers the
+// reasoning overhead that's left once it stops second-guessing.
+//
+// Verified end-to-end with the REAL (longer, more constraint-heavy)
+// enhanceVideoPrompt system prompt specifically: at 2000 tokens it still hit
+// finish_reason:length with zero output every time — more constraints in the
+// prompt (camera vocab + audio + subject-count + world-frame rules) means
+// more for the model to reason through before committing to a draft. Needed
+// ~2659 tokens to complete cleanly; budgeted well above that for margin.
+// This means the optimiser can legitimately take 60-90s to respond now —
+// real cost of moving to a reasoning model, not a bug — hence the equally
+// generous timeout.
+const ENHANCE_TIMEOUT_MS = 90_000;
+const ENHANCE_NUM_PREDICT = 4000;
+const NO_SECOND_GUESSING = ' Think briefly, draft once, and output that draft immediately as your final answer — do not reconsider, revise, or second-guess your draft once written.';
+
 async function enhanceGeneralPrompt(userPrompt) {
   const messages = [
     {
       role: 'system',
-      content: 'You are an expert at writing clear, effective prompts. Rewrite the given prompt to be more specific, detailed and likely to produce a high-quality response. Preserve the original intent exactly — do NOT change the subject matter. Return only the improved prompt text, no explanation, no quotes, no preamble.',
+      content: 'You are an expert at writing clear, effective prompts. Rewrite the given prompt to be more specific, detailed and likely to produce a high-quality response. Preserve the original intent exactly — do NOT change the subject matter. Return only the improved prompt text, no explanation, no quotes, no preamble.' + NO_SECOND_GUESSING,
     },
     { role: 'user', content: userPrompt },
   ];
@@ -1029,7 +1057,7 @@ async function enhanceGeneralPrompt(userPrompt) {
       config.models.general.endpoint,
       config.models.general.model,
       messages,
-      { signal: AbortSignal.timeout(30_000), numPredict: 500 },
+      { signal: AbortSignal.timeout(ENHANCE_TIMEOUT_MS), numPredict: ENHANCE_NUM_PREDICT },
     );
     return { positive: enhanced.trim() || userPrompt };
   } catch {
@@ -1038,15 +1066,29 @@ async function enhanceGeneralPrompt(userPrompt) {
 }
 
 async function enhanceVideoPrompt(userPrompt) {
+  // Structure and rules per LTX's own LTX-2.3 prompting guide
+  // (ltx.io/blog/ltx-2-3-prompt-guide): subject first, then explicit motion,
+  // then camera behaviour, then visual tone/style last; describe how the
+  // subject looks once camera movement completes; one main scene idea only
+  // ("too many competing details can make the result feel unfocused" — this
+  // matches our own finding that LTX-2.3 reliably handles ~1-2 distinct
+  // subjects and degrades hard past that, e.g. 5 cars renders as 3 look-alike
+  // cars swapping places); long, specific prompts outperform short vague
+  // ones; audio quality is much improved in 2.3 so it's worth explicitly
+  // describing the acoustic environment, voice qualities, and ambient sound.
   const messages = [
     {
       role: 'system',
-      content: `You are an expert text-to-video diffusion prompt engineer for short clips (5-10 seconds, LTX-2).
+      content: `You are an expert prompt engineer for LTX-2.3 text-to-video generation (10-20 second clips with synchronized audio).
 Rewrite the user's idea as a single dense prompt clause for video generation — NOT a script, NOT a screenplay, NOT a shot list.
-Include: subject + appearance, specific motion/action, camera move (e.g. slow dolly in, static, handheld pan), shot type (wide, medium, close-up), lighting, environment, mood, and a style tag (cinematic, photorealistic, 8k).
-When describing people walking, moving, or in motion, phrase it in WORLD-FRAME terms (e.g. "pedestrians crossing the street", "figure striding forward through the plaza", "businesspeople walking past the camera from left to right") — NOT treadmill phrasing like "people walking" without a path. Combine with the camera move so the subject visibly translates relative to the environment, not just animates in place.
+
+Follow this order: (1) main subject named clearly, (2) explicit motion/action — what happens, not vague qualities, (3) camera behaviour if relevant, (4) visual tone/style last.
+Camera vocabulary to draw from: follows, tracks, pans across, circles around, tilts upward, pushes in, pulls back, overhead view, handheld movement, over-the-shoulder, wide establishing shot, static frame. Describe how the subject appears once the camera movement completes, not just the movement itself.
+Audio matters as much as visuals now — always include a clause describing the acoustic environment, ambient sound, and/or music that matches the scene (LTX-2.3 generates real synchronized audio from this).
+Keep to ONE main subject/scene idea. Do not ask for more than 1-2 distinct simultaneous characters or objects doing independent things — LTX-2.3 reliably tracks 1-2 subjects and visibly loses count/identity (duplicating, merging, or swapping) past that, no matter how the request is phrased. If the user's idea has 3+ simultaneous subjects, pick the most important 1-2 and drop or background the rest rather than trying to render all of them distinctly.
+When describing people walking or moving, phrase it in WORLD-FRAME terms (e.g. "a figure striding forward through the plaza", "a pedestrian crossing the street left to right") — NOT treadmill phrasing like "a person walking" with no path, which renders as bobbing in place with warped detail rather than real translation through the scene.
 Do NOT include: dialogue, voiceover, scene numbers, [VISUAL:]/[VOICEOVER:] tags, multiple scenes, narration.
-Return ONLY the improved prompt as one paragraph of comma-separated phrases. No preamble, no quotes, no markdown.`,
+Return ONLY the improved prompt as one dense paragraph. No preamble, no quotes, no markdown.` + NO_SECOND_GUESSING,
     },
     { role: 'user', content: userPrompt },
   ];
@@ -1055,7 +1097,7 @@ Return ONLY the improved prompt as one paragraph of comma-separated phrases. No 
       config.models.general.endpoint,
       config.models.general.model,
       messages,
-      { signal: AbortSignal.timeout(30_000), numPredict: 400 },
+      { signal: AbortSignal.timeout(ENHANCE_TIMEOUT_MS), numPredict: ENHANCE_NUM_PREDICT },
     );
     return { positive: enhanced.trim() || userPrompt };
   } catch {
@@ -1073,7 +1115,7 @@ Return ONLY a JSON object — no markdown, no explanation:
 {"positive":"...","negative":"..."}
 
 Rules for positive: expand the description with subject detail, realistic skin and anatomy, perfect hands with correct finger count, natural pose, cinematic lighting, photorealistic, 8k uhd, high detail.
-Rules for negative: always include anatomy issues (extra fingers, missing fingers, deformed hands, bad anatomy) plus any artefacts relevant to the subject.`,
+Rules for negative: always include anatomy issues (extra fingers, missing fingers, deformed hands, bad anatomy) plus any artefacts relevant to the subject.` + NO_SECOND_GUESSING,
     },
     { role: 'user', content: userPrompt },
   ];
@@ -1082,7 +1124,7 @@ Rules for negative: always include anatomy issues (extra fingers, missing finger
       config.models.general.endpoint,
       config.models.general.model,
       messages,
-      { signal: AbortSignal.timeout(30_000), numPredict: 500 },
+      { signal: AbortSignal.timeout(ENHANCE_TIMEOUT_MS), numPredict: ENHANCE_NUM_PREDICT },
     );
     const match = raw.match(/\{[\s\S]*\}/);
     if (match) {
@@ -1202,15 +1244,16 @@ async function handleVideoAgent(socket, prompt, convId, imageData) {
   let fullResponse = '';
   const isI2V = !!imageData;
   try {
-    const mode = isI2V ? 'image-to-video with LTX-2.3' : 'text-to-video with LTX-2';
+    const mode = isI2V ? 'image-to-video with LTX-2.3' : 'text-to-video with LTX-2.3';
     const msg1 = `Starting ComfyUI and generating ${mode}... This may take a few minutes.\n\n`;
     socket.emit('token', { token: msg1 });
     fullResponse += msg1;
 
     await ensureComfyRunning();
+    // Both now run the same two-pass LTX-2.3 pipeline, so same timeout budget.
     const vidData = isI2V
-      ? await generateI2V(config.models.comfyui.endpoint, prompt, imageData, 1_200_000) // 20 min for two-pass i2v
-      : await generateVideo(config.models.comfyui.endpoint, prompt, 900_000);          // 15 min for t2v
+      ? await generateI2V(config.models.comfyui.endpoint, prompt, imageData, 1_200_000) // 20 min
+      : await generateVideo(config.models.comfyui.endpoint, prompt, 1_200_000);        // 20 min
 
     // Move cached video to per-user assets directory
     const cachedPath = join(__dirname, '..', 'data', 'videos', vidData.filename);

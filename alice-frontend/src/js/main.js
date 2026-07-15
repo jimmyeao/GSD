@@ -898,7 +898,15 @@ optimiseBtn.addEventListener('click', () => {
     return;
   }
   setOptimising(true);
-  _optimiseTimer = setTimeout(() => setOptimising(false), 35_000);
+  // Backend's enhance*Prompt() calls now budget up to 90s for the LLM itself
+  // (verified the real video-prompt system prompt needs ~2600+ reasoning
+  // tokens to complete, given how many constraints it has to satisfy) — give
+  // real headroom past that, and show an actual error on a genuine timeout
+  // instead of resetting the button silently with zero feedback.
+  _optimiseTimer = setTimeout(() => {
+    setOptimising(false);
+    chat.addErrorMessage('Prompt optimisation timed out — try again, or check the LLM backend is reachable.');
+  }, 100_000);
   try {
     client.optimisePrompt(content, selectedAgent.id);
   } catch (err) {

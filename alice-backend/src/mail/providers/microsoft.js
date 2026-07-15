@@ -39,10 +39,16 @@ function mapRecipients(arr) {
   return arr.map(mapRecipient).filter(Boolean);
 }
 
-async function graphFetch(accessToken, path, { headers = {}, ...init } = {}) {
+async function graphFetch(accessToken, path, { headers = {}, signal, ...init } = {}) {
   const url = path.startsWith('http') ? path : `${GRAPH}${path}`;
+  // No timeout here meant a stalled/rate-limited Graph API call would hang
+  // the whole MailAgent tool loop indefinitely with zero feedback to the
+  // user — the loop's own read-tool call sites have no timeout of their own.
+  const timeoutSignal = AbortSignal.timeout(30_000);
+  const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const resp = await fetch(url, {
     ...init,
+    signal: combined,
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: 'application/json',
