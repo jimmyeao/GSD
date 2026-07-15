@@ -898,6 +898,12 @@ export async function runMailAgent({ socket, user, content, history = [], convId
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
       let resp;
       const iterStart = Date.now();
+      // completeWithTools is a single non-streaming call — reasoning models
+      // can take 30-90+ seconds with zero output in between, which looks
+      // identical to "stopped" from the UI. Show the same "thinking"
+      // indicator the main chat stream uses; appendToken() hides it
+      // automatically the moment real output (narration or content) arrives.
+      socket.emit('thinking', {});
       try {
         resp = await completeWithTools(modelCfg.endpoint, modelCfg.model, messages, {
           signal: abort.signal,

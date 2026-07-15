@@ -121,6 +121,7 @@ export async function exchangeCode(provider, code, redirectUri) {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (!resp.ok) {
@@ -170,6 +171,7 @@ export async function refreshAccessToken(provider, refreshToken) {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
+    signal: AbortSignal.timeout(30_000),
   });
 
   if (!resp.ok) {

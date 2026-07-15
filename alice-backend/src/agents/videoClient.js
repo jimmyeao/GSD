@@ -1,6 +1,8 @@
 /**
  * Video generation client for ComfyUI.
- * Supports text-to-video (LTX-2 19B Distilled) and image-to-video (LTX-2.3 22B).
+ * Both text-to-video and image-to-video run the same two-pass LTX-2.3 22B
+ * pipeline (sample at half-res → latent upscale → refine at full-res) for
+ * consistent sharpness; T2V just bypasses the image-conditioning step.
  */
 
 import { monitorProgress } from '../comfyProgress.js';
@@ -39,30 +41,78 @@ async function uploadImageToComfy(endpoint, dataUrl, filename) {
 }
 
 /**
- * Build a LTX-2 distilled text-to-video API workflow.
+ * Build a LTX-2.3 text-to-video API workflow.
+ *
+ * Originally this ran the older ltx-2-19b-distilled checkpoint in a single
+ * 8-step pass at full resolution, which produced noticeably soft video —
+ * unlike I2V's two-pass (half-res sample → latent upscale → full-res refine)
+ * approach on ltx-2.3-22b, which is visibly sharper. LTXVImgToVideoInplace
+ * has a `bypass` flag that makes it a pure passthrough when no real image is
+ * needed, so this reuses I2V's exact proven pipeline/model pairing with the
+ * image-conditioning switched off via an EmptyImage placeholder — same
+ * sharpness benefit, no image required.
+ *
+ * @param {number} durationSeconds  Target clip length. LTX-2 frame counts are
+ *   24fps*seconds+1 (matches the 193=8s convention used throughout this file).
+ * @param {number} fullWidth/fullHeight  Output resolution (pre-upscale pass
+ *   runs at exactly half this). LTX rounds to the nearest multiple of 32
+ *   internally (e.g. 720→704) — this is a model constraint, not a bug.
  */
-function buildT2VWorkflow(prompt) {
-  const seed = Math.floor(Math.random() * 2 ** 32);
+function buildT2VWorkflow(prompt, durationSeconds = 12, fullWidth = 1280, fullHeight = 720) {
+  const seed1 = Math.floor(Math.random() * 2 ** 32);
+  const seed2 = Math.floor(Math.random() * 2 ** 32);
+  const fps = 24;
+  const frames = Math.round(durationSeconds * fps) + 1;
+  const latentW = Math.round(fullWidth / 2);
+  const latentH = Math.round(fullHeight / 2);
 
   return {
-    '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'ltx-2-19b-distilled.safetensors' } },
-    '2': { class_type: 'LTXAVTextEncoderLoader', inputs: { text_encoder: 'gemma_3_12B_it_fp4_mixed.safetensors', ckpt_name: 'ltx-2-19b-distilled.safetensors', device: 'default' } },
-    '3': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['2', 0] } },
-    '4': { class_type: 'CLIPTextEncode', inputs: { text: 'blurry, low quality, watermark, text overlay, still frame, static scene, motionless subjects, walking in place, treadmill motion, frozen people, stationary pedestrians', clip: ['2', 0] } },
-    '5': { class_type: 'LTXVConditioning', inputs: { positive: ['3', 0], negative: ['4', 0], frame_rate: 24 } },
-    '6': { class_type: 'EmptyLTXVLatentVideo', inputs: { width: 1280, height: 720, length: 193, batch_size: 1 } },
-    '7': { class_type: 'LTXVAudioVAELoader', inputs: { ckpt_name: 'ltx-2-19b-distilled.safetensors' } },
-    '8': { class_type: 'LTXVEmptyLatentAudio', inputs: { frames_number: 193, frame_rate: 24, batch_size: 1, audio_vae: ['7', 0] } },
-    '9': { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: ['6', 0], audio_latent: ['8', 0] } },
-    '10': { class_type: 'CFGGuider', inputs: { model: ['1', 0], positive: ['5', 0], negative: ['5', 1], cfg: 1 } },
-    '11': { class_type: 'KSamplerSelect', inputs: { sampler_name: 'euler_ancestral' } },
-    '12': { class_type: 'ManualSigmas', inputs: { sigmas: '1., 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0' } },
-    '13': { class_type: 'RandomNoise', inputs: { noise_seed: seed } },
-    '14': { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['13', 0], guider: ['10', 0], sampler: ['11', 0], sigmas: ['12', 0], latent_image: ['9', 0] } },
-    '15': { class_type: 'LTXVSeparateAVLatent', inputs: { av_latent: ['14', 0] } },
-    '16': { class_type: 'VAEDecodeTiled', inputs: { samples: ['15', 0], vae: ['1', 2], tile_size: 512, overlap: 64, temporal_size: 4096, temporal_overlap: 8 } },
-    '17': { class_type: 'CreateVideo', inputs: { images: ['16', 0], fps: 24 } },
-    '18': { class_type: 'SaveVideo', inputs: { video: ['17', 0], filename_prefix: 'alice_video', format: 'mp4', codec: 'h264' } },
+    // ── Model loading ───────────────────────────────────────────
+    '1':  { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'ltx-2.3-22b-dev.safetensors' } },
+    '2':  { class_type: 'LTXAVTextEncoderLoader', inputs: { text_encoder: 'gemma_3_12B_it_fp4_mixed.safetensors', ckpt_name: 'ltx-2.3-22b-dev.safetensors', device: 'default' } },
+    '3':  { class_type: 'LTXVAudioVAELoader', inputs: { ckpt_name: 'ltx-2.3-22b-dev.safetensors' } },
+    '4':  { class_type: 'LatentUpscaleModelLoader', inputs: { model_name: 'ltx-2.3-spatial-upscaler-x2-1.1.safetensors' } },
+    '5':  { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: 'ltx-2.3-22b-distilled-lora-384.safetensors', strength_model: 0.5 } },
+
+    // ── Text encoding ───────────────────────────────────────────
+    '6':  { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['2', 0] } },
+    '7':  { class_type: 'CLIPTextEncode', inputs: { text: 'blurry, low quality, watermark, text overlay, still frame, static scene, motionless subjects, walking in place, treadmill motion, frozen people, stationary pedestrians', clip: ['2', 0] } },
+    '8':  { class_type: 'LTXVConditioning', inputs: { positive: ['6', 0], negative: ['7', 0], frame_rate: fps } },
+
+    // ── Image-conditioning placeholder (bypassed — pure T2V) ────
+    '9':  { class_type: 'EmptyImage', inputs: { width: latentW, height: latentH, batch_size: 1, color: 0 } },
+
+    // ── Pass 1: initial latent, no image injection (bypassed) ───
+    '12': { class_type: 'EmptyLTXVLatentVideo', inputs: { width: latentW, height: latentH, length: frames, batch_size: 1 } },
+    '13': { class_type: 'LTXVEmptyLatentAudio', inputs: { frames_number: frames, frame_rate: fps, batch_size: 1, audio_vae: ['3', 0] } },
+    '14': { class_type: 'LTXVImgToVideoInplace', inputs: { vae: ['1', 2], image: ['9', 0], latent: ['12', 0], strength: 0.7, bypass: true } },
+    '15': { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: ['14', 0], audio_latent: ['13', 0] } },
+
+    // ── Pass 1: 8-step distilled sampling ────────────────────────
+    '16': { class_type: 'CFGGuider', inputs: { model: ['5', 0], positive: ['8', 0], negative: ['8', 1], cfg: 1 } },
+    '17': { class_type: 'KSamplerSelect', inputs: { sampler_name: 'euler_ancestral_cfg_pp' } },
+    '18': { class_type: 'ManualSigmas', inputs: { sigmas: '1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0' } },
+    '19': { class_type: 'RandomNoise', inputs: { noise_seed: seed1 } },
+    '20': { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['19', 0], guider: ['16', 0], sampler: ['17', 0], sigmas: ['18', 0], latent_image: ['15', 0] } },
+    '21': { class_type: 'LTXVSeparateAVLatent', inputs: { av_latent: ['20', 0] } },
+
+    // ── Latent upscale (no re-injection needed, image is bypassed) ─
+    '22': { class_type: 'LTXVLatentUpsampler', inputs: { samples: ['21', 0], upscale_model: ['4', 0], vae: ['1', 2] } },
+    '24': { class_type: 'LTXVConcatAVLatent', inputs: { video_latent: ['22', 0], audio_latent: ['21', 1] } },
+
+    // ── Pass 2: 3-step refinement ────────────────────────────────
+    '25': { class_type: 'CFGGuider', inputs: { model: ['5', 0], positive: ['8', 0], negative: ['8', 1], cfg: 1 } },
+    '26': { class_type: 'KSamplerSelect', inputs: { sampler_name: 'euler_cfg_pp' } },
+    '27': { class_type: 'ManualSigmas', inputs: { sigmas: '0.85, 0.7250, 0.4219, 0.0' } },
+    '28': { class_type: 'RandomNoise', inputs: { noise_seed: seed2 } },
+    '29': { class_type: 'SamplerCustomAdvanced', inputs: { noise: ['28', 0], guider: ['25', 0], sampler: ['26', 0], sigmas: ['27', 0], latent_image: ['24', 0] } },
+    '30': { class_type: 'LTXVSeparateAVLatent', inputs: { av_latent: ['29', 0] } },
+
+    // ── Decode + save ───────────────────────────────────────────
+    '31': { class_type: 'VAEDecodeTiled', inputs: { samples: ['30', 0], vae: ['1', 2], tile_size: 768, overlap: 64, temporal_size: 4096, temporal_overlap: 4 } },
+    '32': { class_type: 'LTXVAudioVAEDecode', inputs: { samples: ['30', 1], audio_vae: ['3', 0] } },
+    '33': { class_type: 'CreateVideo', inputs: { images: ['31', 0], audio: ['32', 0], fps } },
+    '34': { class_type: 'SaveVideo', inputs: { video: ['33', 0], filename_prefix: 'alice_video', format: 'mp4', codec: 'h264' } },
   };
 }
 
@@ -74,21 +124,21 @@ function buildT2VWorkflow(prompt) {
  *   Pass 2: image inject (1.0) → 4-step refine (euler_cfg_pp)
  *   Decode: video + audio → CreateVideo → SaveVideo
  */
-function buildI2VWorkflow(prompt, imageName) {
+function buildI2VWorkflow(prompt, imageName, durationSeconds = 12, fullWidth = 1280, fullHeight = 720) {
   const seed1 = Math.floor(Math.random() * 2 ** 32);
   const seed2 = Math.floor(Math.random() * 2 ** 32);
 
   // First pass is half-res, upscaled 2x by LTXVLatentUpsampler
-  const latentW = 640;   // → 1280 after upscale
-  const latentH = 360;   // → 720 after upscale
-  const frames = 193;    // ~8 seconds at 24fps (24*8+1)
+  const latentW = Math.round(fullWidth / 2);
+  const latentH = Math.round(fullHeight / 2);
   const fps = 24;
+  const frames = Math.round(durationSeconds * fps) + 1;
 
   return {
     // ── Model loading ───────────────────────────────────────────
-    '1':  { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'ltx-2.3-22b-dev-fp8.safetensors' } },
-    '2':  { class_type: 'LTXAVTextEncoderLoader', inputs: { text_encoder: 'gemma_3_12B_it_fp4_mixed.safetensors', ckpt_name: 'ltx-2.3-22b-dev-fp8.safetensors', device: 'default' } },
-    '3':  { class_type: 'LTXVAudioVAELoader', inputs: { ckpt_name: 'ltx-2.3-22b-dev-fp8.safetensors' } },
+    '1':  { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'ltx-2.3-22b-dev.safetensors' } },
+    '2':  { class_type: 'LTXAVTextEncoderLoader', inputs: { text_encoder: 'gemma_3_12B_it_fp4_mixed.safetensors', ckpt_name: 'ltx-2.3-22b-dev.safetensors', device: 'default' } },
+    '3':  { class_type: 'LTXVAudioVAELoader', inputs: { ckpt_name: 'ltx-2.3-22b-dev.safetensors' } },
     '4':  { class_type: 'LatentUpscaleModelLoader', inputs: { model_name: 'ltx-2.3-spatial-upscaler-x2-1.1.safetensors' } },
     '5':  { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: 'ltx-2.3-22b-distilled-lora-384.safetensors', strength_model: 0.5 } },
 
@@ -214,10 +264,12 @@ async function pollForVideo(endpoint, clientId, promptId, timeoutMs, onProgress)
 
 /**
  * Generate a text-to-video.
+ * @param {number} durationSeconds  Clip length, default 12s (10-20s range tested on DGX Spark).
+ * @param {number} width/height     Output resolution, default 1280x720.
  */
-export async function generateVideo(endpoint, prompt, timeoutMs = 300_000) {
+export async function generateVideo(endpoint, prompt, timeoutMs = 300_000, durationSeconds = 12, width = 1280, height = 720) {
   const clientId = `alice-video-${Date.now()}`;
-  const workflow = buildT2VWorkflow(prompt);
+  const workflow = buildT2VWorkflow(prompt, durationSeconds, width, height);
 
   const queueRes = await fetch(`${endpoint}/prompt`, {
     method: 'POST',
@@ -242,14 +294,16 @@ export async function generateVideo(endpoint, prompt, timeoutMs = 300_000) {
  * @param {string} prompt    - Text prompt describing the video motion
  * @param {object} imageData - { name: string, dataUrl: string } base64 image
  * @param {number} timeoutMs - Timeout
+ * @param {number} durationSeconds - Clip length, default 12s (10-20s range tested on DGX Spark).
+ * @param {number} width/height    - Output resolution, default 1280x720.
  */
-export async function generateI2V(endpoint, prompt, imageData, timeoutMs = 300_000) {
+export async function generateI2V(endpoint, prompt, imageData, timeoutMs = 300_000, durationSeconds = 12, width = 1280, height = 720) {
   const clientId = `alice-i2v-${Date.now()}`;
 
   // Upload the reference image to ComfyUI
   const imageName = await uploadImageToComfy(endpoint, imageData.dataUrl, imageData.name);
 
-  const workflow = buildI2VWorkflow(prompt, imageName);
+  const workflow = buildI2VWorkflow(prompt, imageName, durationSeconds, width, height);
 
   const queueRes = await fetch(`${endpoint}/prompt`, {
     method: 'POST',

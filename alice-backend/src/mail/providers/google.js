@@ -28,8 +28,14 @@ const LABEL_MAP = {
 };
 
 async function gFetch(accessToken, url, init = {}) {
+  // No timeout here meant a stalled/rate-limited Google API call would hang
+  // the whole MailAgent tool loop indefinitely with zero feedback to the
+  // user — the loop's own read-tool call sites have no timeout of their own.
+  const timeoutSignal = AbortSignal.timeout(30_000);
+  const combined = init.signal ? AbortSignal.any([init.signal, timeoutSignal]) : timeoutSignal;
   const resp = await fetch(url, {
     ...init,
+    signal: combined,
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: 'application/json',
