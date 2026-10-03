@@ -22,6 +22,14 @@ export const config = {
   // header sent (fine for a direct-to-vLLM endpoint during local dev).
   llmGatewayKey: process.env.LLM_GATEWAY_KEY || null,
 
+  // Shared secret for the machine-to-machine agent API (/api/agent/*) —
+  // lets an external tool (e.g. OpenHands) call agent capabilities like
+  // image generation directly over HTTP, bypassing the cookie-session +
+  // CSRF contract the browser-facing REST routes use (an external caller
+  // has no session/cookie to present). Unset = the route responds 503
+  // rather than silently running unauthenticated.
+  agentApiKey: process.env.ALICE_AGENT_API_KEY || null,
+
   oauth: {
     microsoft: {
       clientId: process.env.MS_CLIENT_ID || '',
@@ -54,6 +62,14 @@ export const config = {
       model: process.env.MAIL_MODEL ?? 'alice-mail',
       timeout: 300_000,
     },
+    // Vision-capable model (Ollama qwen2.5vl:7b, behind the same gateway) —
+    // used for the generic chat path when a user attaches an image, since
+    // none of general/coder/mail above are multimodal.
+    vision: {
+      endpoint: process.env.VISION_LLM_URL ?? 'http://localhost:4000',
+      model: process.env.VISION_MODEL ?? 'alice-vision',
+      timeout: 300_000,
+    },
     comfyui: {
       endpoint: process.env.COMFYUI_URL ?? 'http://localhost:8188',
       timeout: 120_000,
@@ -63,6 +79,13 @@ export const config = {
   mermaid: {
     renderUrl: process.env.MERMAID_RENDER_URL ?? 'https://mermaid.ink/img/',
   },
+
+  memory: {
+    // Off by default until the extract→store→retrieve loop is verified manually.
+    extractionEnabled: process.env.MEMORY_EXTRACTION_ENABLED === 'true',
+  },
+  // Mail contact/thread cache-aside — on by default, flip off if staleness complaints outweigh the saved live calls.
+  mailCacheEnabled: process.env.MAIL_CACHE_ENABLED !== 'false',
 
   cors: {
     origin: process.env.CORS_ORIGIN ?? '*',

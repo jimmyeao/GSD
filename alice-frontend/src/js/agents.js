@@ -13,7 +13,7 @@ export const AGENTS = [
     description: 'Email + calendar assistant. Can read, draft, reply, schedule — mutations always ask you to approve.',
     example: 'Reply to the latest email from Sarah confirming Thursday at 10am.',
     icon: '✉',
-    model: 'General LLM',
+    model: 'Laguna (Mail)',
   },
   {
     id: 'AlertAgent',
@@ -21,7 +21,7 @@ export const AGENTS = [
     description: 'Summarises alerts and suggests first-response actions.',
     example: 'Summarise these Zabbix alerts and flag anything critical.',
     icon: '🚨',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'AnalystAgent',
@@ -29,7 +29,7 @@ export const AGENTS = [
     description: 'Analyses structured data, logs, and metrics to extract insight.',
     example: 'Analyse this CSV of login attempts and highlight anomalies.',
     icon: '📊',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'ArchitectAgent',
@@ -37,7 +37,7 @@ export const AGENTS = [
     description: 'Designs system architectures and evaluates trade-offs.',
     example: 'Design a highly-available file share for 200 Windows clients.',
     icon: '🏛',
-    model: 'Qwen3-Coder 80B',
+    model: 'Laguna (Coder)',
   },
   {
     id: 'AssistantAgent',
@@ -45,7 +45,7 @@ export const AGENTS = [
     description: 'General-purpose conversational assistant for everyday questions.',
     example: 'Explain the difference between SCCM and Intune in plain English.',
     icon: '💬',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'ClientBriefAgent',
@@ -53,7 +53,7 @@ export const AGENTS = [
     description: 'Turns raw notes into polished client-facing briefs.',
     example: 'Write a one-page brief for a 50-seat Intune migration.',
     icon: '📋',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'CoderAgent',
@@ -61,7 +61,7 @@ export const AGENTS = [
     description: 'Writes, debugs, and refactors production code in any language.',
     example: 'Write a Python script to parse Intune CSV exports.',
     icon: '💻',
-    model: 'Qwen3-Coder 80B',
+    model: 'Laguna (Coder)',
   },
   {
     id: 'DemoAgent',
@@ -69,7 +69,7 @@ export const AGENTS = [
     description: 'Builds runnable demo scenarios and walk-through scripts.',
     example: 'Create a demo showing Autopilot enrolment end to end.',
     icon: '🎬',
-    model: 'Qwen3-Coder 80B',
+    model: 'Laguna (Coder)',
   },
   {
     id: 'DeployAgent',
@@ -77,7 +77,7 @@ export const AGENTS = [
     description: 'Produces deployment plans, runbooks, and rollout checklists.',
     example: 'Draft a deployment plan for Defender for Endpoint.',
     icon: '🚀',
-    model: 'Qwen3-Coder 80B',
+    model: 'Laguna (Coder)',
   },
   {
     id: 'DiagramAgent',
@@ -85,7 +85,7 @@ export const AGENTS = [
     description: 'Generates Mermaid diagrams for architecture and flows.',
     example: 'Diagram the Alice request flow from browser to model.',
     icon: '📐',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'DocAgent',
@@ -93,7 +93,7 @@ export const AGENTS = [
     description: 'Writes clear technical documentation and how-to guides.',
     example: 'Document how to rotate the Alice admin password.',
     icon: '📝',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'GitAgent',
@@ -101,7 +101,7 @@ export const AGENTS = [
     description: 'Helps with Git workflows, commits, merges, and history.',
     example: 'Write a commit message for these staged changes.',
     icon: '🌿',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'HealthAgent',
@@ -109,7 +109,7 @@ export const AGENTS = [
     description: 'Reports on service health and interprets diagnostics.',
     example: 'Interpret this systemctl status output for alice-web.',
     icon: '🩺',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'ImageAgent',
@@ -125,7 +125,7 @@ export const AGENTS = [
     description: 'Plans and scripts infrastructure changes for Windows and Linux.',
     example: 'Script the provisioning of a new Hyper-V VM from a template.',
     icon: '🏗',
-    model: 'Qwen3-Coder 80B',
+    model: 'Laguna (Coder)',
   },
   {
     id: 'LogWatchAgent',
@@ -133,7 +133,7 @@ export const AGENTS = [
     description: 'Watches log streams for errors and surfaces likely causes.',
     example: 'Scan these nginx error logs for the last hour and summarise.',
     icon: '🔍',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'ProposalAgent',
@@ -141,7 +141,7 @@ export const AGENTS = [
     description: 'Drafts client-ready proposals with scope, cost, and risk.',
     example: 'Draft a proposal for a 100-seat Windows 11 refresh.',
     icon: '📄',
-    model: 'Qwen3-Coder 80B',
+    model: 'Laguna (Coder)',
   },
   {
     id: 'ResearchAgent',
@@ -149,7 +149,7 @@ export const AGENTS = [
     description: 'Deep-dives into technical topics and cites sources.',
     example: 'Research best practices for Entra ID Conditional Access.',
     icon: '🔬',
-    model: 'Qwen3-Coder 80B',
+    model: 'Laguna (Coder)',
   },
   {
     id: 'ReviewAgent',
@@ -157,7 +157,7 @@ export const AGENTS = [
     description: 'Reviews code for bugs, style, and security issues.',
     example: 'Review this PowerShell script for unsafe parameter handling.',
     icon: '🔎',
-    model: 'Qwen3-Coder 80B',
+    model: 'Laguna (Coder)',
   },
   {
     id: 'SlideAgent',
@@ -165,7 +165,7 @@ export const AGENTS = [
     description: 'Generates downloadable PowerPoint presentations.',
     example: 'Build a five-slide intro deck for a Alice client demo.',
     icon: '📊',
-    model: 'General LLM',
+    model: 'Laguna (General)',
   },
   {
     id: 'TestAgent',
@@ -173,12 +173,12 @@ export const AGENTS = [
     description: 'Writes unit and integration tests for existing code.',
     example: 'Write pytest tests for this Alice auth helper.',
     icon: '🧪',
-    model: 'Qwen3-Coder 80B',
+    model: 'Laguna (Coder)',
   },
   {
     id: 'VideoAgent',
     label: 'Video',
-    description: 'Generates short AI videos from text descriptions using LTX-2.',
+    description: 'Generates 1080p AI videos. Pick MiniMax H3 (slower, higher fidelity) or LTX-2.5 (faster) and a mode: image-to-video, first/last-frame, or (H3 only) character/style references.',
     example: 'A time-lapse of a modern office building from dawn to dusk, clouds moving across the sky.',
     icon: '🎬',
     model: 'ComfyUI',
@@ -189,13 +189,22 @@ export const AGENTS = [
     description: 'Writes scripts and shot lists for short technical videos.',
     example: 'Write a 90-second video script explaining Alice.',
     icon: '🎥',
-    model: 'General LLM',
+    model: 'Laguna (General)',
+  },
+  {
+    id: 'MusicAgent',
+    label: 'Music',
+    description: 'Generates music tracks with ACE-Step, for pairing with Alice-generated videos. Instrumental by default; set a duration and optionally add lyrics.',
+    example: 'Ambient, calm piano, cinematic swell, 80 BPM, instrumental.',
+    icon: '🎵',
+    model: 'ComfyUI',
   },
 ];
 
 export const MODEL_BADGE_CLASS = {
-  'Qwen3-Coder 80B': 'badge-coder',
-  'General LLM': 'badge-general',
+  'Laguna (Coder)': 'badge-coder',
+  'Laguna (General)': 'badge-general',
+  'Laguna (Mail)': 'badge-mail',
   'ComfyUI': 'badge-image',
   'Auto': 'badge-auto',
 };

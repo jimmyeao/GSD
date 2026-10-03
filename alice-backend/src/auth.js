@@ -179,6 +179,28 @@ export function csrfProtect(req, res, next) {
   next();
 }
 
+/**
+ * Machine-to-machine auth for the external agent API (/api/agent/*) — an
+ * external caller (e.g. OpenHands) has no browser session/cookie to
+ * present, so this checks a shared secret instead: `Authorization: Bearer
+ * <key>` or `X-API-Key: <key>`, compared against config.agentApiKey. Must
+ * be mounted before the global csrfProtect (see server.js) since CSRF's
+ * double-submit-cookie contract is itself a browser-only assumption this
+ * caller can't satisfy.
+ */
+export function requireApiKey(req, res, next) {
+  if (!config.agentApiKey) {
+    return res.status(503).json({ error: 'Agent API not configured (set ALICE_AGENT_API_KEY)' });
+  }
+  const header = req.get('Authorization') || '';
+  const bearerMatch = header.match(/^Bearer\s+(.+)$/i);
+  const key = bearerMatch ? bearerMatch[1] : req.get('X-API-Key');
+  if (!key || key !== config.agentApiKey) {
+    return res.status(401).json({ error: 'Invalid or missing API key' });
+  }
+  next();
+}
+
 // ── Socket.IO middleware ────────────────────────────────────────────
 
 /**

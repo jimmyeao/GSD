@@ -22,9 +22,19 @@ import { stmts } from '../db.js';
 import { completeWithTools, complete, LLMUnavailableError } from './llmClient.js';
 import { withAccount, getProviderAdapter } from '../mail/client.js';
 import { runUnsubscribe, chooseStrategy } from '../mail/unsubscribe.js';
+import { getMemoryContext, extractFactsAsync } from '../memory.js';
+import {
+  getContactContext, getFreshThreadsMatching, upsertContact, upsertThread, invalidateMailCache,
+} from '../mail/cache.js';
 
 const MAX_ITERATIONS = 6;
 const MAX_PENDING_PER_USER = 20;
+
+// Action types that can make the mail/thread cache stale — invalidated
+// (whole-account, see mail/cache.js) after a successful execution.
+const MAIL_CACHE_INVALIDATING_ACTIONS = new Set([
+  'send_message', 'reply_to_message', 'trash_message', 'move_message', 'unsubscribe_message',
+]);
 
 // ── Tool catalogue (OpenAI function-call format) ───────────────────────
 
@@ -634,6 +644,43 @@ function logActionSafely(tag, action, accountId) {
 
 // ── Read-only tool execution ───────────────────────────────────────────
 
+/**
+ * Populates the mail contact/thread cache from a live list_messages result.
+ * `full` carries the uncompacted from/threadId fields the cache needs;
+ * `compacted` is the already-shaped output (same fields the model sees) so
+ * thread cache hits replay an identical shape.
+ */
+function cachePopulateFromList(accountId, full, compacted) {
+  const byThread = new Map();
+  for (let i = 0; i < full.length; i++) {
+    const m = full[i];
+    if (m.from?.email) {
+      upsertContact(accountId, {
+        email: m.from.email,
+        displayName: m.from.name,
+        lastMessageId: m.id,
+        lastMessageDate: m.date,
+        lastSubject: m.subject,
+      });
+    }
+    if (!m.threadId) continue;
+    if (!byThread.has(m.threadId)) byThread.set(m.threadId, { participants: [], summaries: [], subject: m.subject, lastDate: m.date });
+    const bucket = byThread.get(m.threadId);
+    if (m.from?.email) bucket.participants.push({ name: m.from.name || null, email: m.from.email });
+    bucket.summaries.push(compacted[i]);
+    if (m.date && (!bucket.lastDate || m.date > bucket.lastDate)) bucket.lastDate = m.date;
+  }
+  for (const [threadId, bucket] of byThread) {
+    upsertThread(accountId, {
+      threadId,
+      subject: bucket.subject,
+      participants: bucket.participants,
+      messageSummaries: bucket.summaries,
+      lastMessageDate: bucket.lastDate,
+    });
+  }
+}
+
 async function runReadTool(user, name, args) {
   const accountId = Number(args.account_id);
   if (name !== 'list_mail_accounts' && !ownsAccount(accountId, user.id)) {
@@ -655,28 +702,54 @@ async function runReadTool(user, name, args) {
       const folder = args.folder || 'inbox';
       const limit = Math.max(1, Math.min(50, Number(args.limit) || 15));
       const q = args.query || '';
+
+      // Cache-aside: only for the default inbox folder + a non-empty query —
+      // scoping to inbox avoids returning inbox-cached results for a
+      // folder:'sent'-type request the cache was never populated from.
+      if (config.mailCacheEnabled && folder === 'inbox' && q) {
+        const cached = getFreshThreadsMatching(accountId, q);
+        if (cached.length) return cached.slice(0, limit);
+      }
+
       const full = await withAccount(accountId, user.id, async (provider, accessToken) => {
         const adapter = getProviderAdapter(provider);
         return adapter.listMessages(accessToken, { folder, limit, q });
       });
-      // Compact the result before handing it to the model — the agent only
-      // needs id/from/subject/snippet/date to decide which emails match and
-      // emit tool calls. Stripping the rest keeps iter-N prompt-eval under
-      // control on large-context models like qwen3:32b.
-      return (Array.isArray(full) ? full : []).map(m => ({
+
+      const compacted = (Array.isArray(full) ? full : []).map(m => ({
         id: m.id,
         from: m.from?.email || m.from?.name || '',
         subject: m.subject || '',
         snippet: (m.snippet || '').slice(0, 120),
         date: m.date || null,
       }));
+
+      cachePopulateFromList(accountId, Array.isArray(full) ? full : [], compacted);
+
+      // Compact the result before handing it to the model — the agent only
+      // needs id/from/subject/snippet/date to decide which emails match and
+      // emit tool calls. Stripping the rest keeps iter-N prompt-eval under
+      // control on large-context models like qwen3:32b.
+      return compacted;
     }
     case 'get_message': {
       if (!args.message_id) throw new Error('message_id required');
-      return withAccount(accountId, user.id, async (provider, accessToken) => {
+      const msg = await withAccount(accountId, user.id, async (provider, accessToken) => {
         const adapter = getProviderAdapter(provider);
         return adapter.getMessage(accessToken, String(args.message_id));
       });
+      // Only opportunistically refresh contact metadata here — bodies are
+      // never cached/served from cache, always live.
+      if (msg?.from?.email) {
+        upsertContact(accountId, {
+          email: msg.from.email,
+          displayName: msg.from.name,
+          lastMessageId: msg.id,
+          lastMessageDate: msg.date,
+          lastSubject: msg.subject,
+        });
+      }
+      return msg;
     }
     case 'list_events': {
       const now = new Date();
@@ -783,8 +856,10 @@ export async function executeApprovedAction(user, approval) {
       if (result && result.result === 'failed') {
         return { ok: false, error: result.details || 'unsubscribe failed', method: result.method };
       }
+      if (MAIL_CACHE_INVALIDATING_ACTIONS.has(approval.action_type)) invalidateMailCache(accountId);
       return { ok: true, result };
     }
+    if (MAIL_CACHE_INVALIDATING_ACTIONS.has(approval.action_type)) invalidateMailCache(accountId);
     return { ok: true, result };
   } catch (err) {
     logActionSafely('failed', approval.action_type, accountId);
@@ -881,8 +956,13 @@ export async function runMailAgent({ socket, user, content, history = [], convId
     ? `\n\n== CONTINUATION (automatic re-invocation) ==\n${continuation}`
     : '';
 
+  const memoryContext = getMemoryContext(user.id, content);
+  const contactContext = getContactContext(accounts.map(a => a.id), content);
+
   const messages = [
     { role: 'system', content: buildSystemPrompt({ strategy, accountsHint }) + continuationHint },
+    ...(memoryContext ? [{ role: 'system', content: memoryContext }] : []),
+    ...(contactContext ? [{ role: 'system', content: contactContext }] : []),
     ...history.slice(-10).filter(h => h?.role && h?.content).map(h => ({ role: h.role, content: h.content })),
     { role: 'user', content },
   ];
@@ -1122,6 +1202,8 @@ export async function runMailAgent({ socket, user, content, history = [], convId
       try {
         stmts.insertMessage.run(convId, 'assistant', 'MailAgent', fullNarration);
         stmts.touchConversation.run(convId);
+        extractFactsAsync(user.id, convId, content, fullNarration)
+          .catch(err => console.error('[memory] extract error:', err.message));
       } catch { /* ignore */ }
     }
     socket.emit('done', { agent: 'MailAgent' });

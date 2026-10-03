@@ -123,12 +123,29 @@ export class SocketClient {
     }
   }
 
-  sendMessage(agent, content, history = [], conversationId = null, imageData = null) {
+  sendMessage(agent, content, history = [], conversationId = null, imageData = null, lastFrameData = null, videoMode = null, references = null, videoModel = null, lyrics = null, musicSeconds = null, chainImagesData = null, imageModel = null, imageAspect = null, upscale4k = false) {
     if (!this.socket || !this.connected) {
       throw new Error('Not connected to backend.');
     }
     const payload = { agent, content, history, conversationId };
     if (imageData) payload.imageData = imageData;
+    // VideoAgent first/last-frame mode: a second attached image is the end keyframe.
+    if (lastFrameData) payload.lastFrameData = lastFrameData;
+    // VideoAgent explicit mode/model selectors + character/style/audio references.
+    if (videoMode) payload.videoMode = videoMode;
+    if (videoModel) payload.videoModel = videoModel;
+    if (references) payload.references = references;
+    // MusicAgent: optional lyrics (empty = instrumental) + target duration.
+    if (lyrics) payload.lyrics = lyrics;
+    if (musicSeconds) payload.musicSeconds = musicSeconds;
+    // VideoAgent chain mode: all attached reference images, matched by name
+    // against each script chunk's own "Image: <filename>" line.
+    if (chainImagesData) payload.chainImagesData = chainImagesData;
+    // ImageAgent explicit model selector — 'auto' (default) omitted since
+    // that's the backend's own default too, only 'flux2' needs to travel.
+    if (imageModel && imageModel !== 'auto') payload.imageModel = imageModel;
+    if (imageAspect && imageAspect !== 'square') payload.imageAspect = imageAspect;
+    if (upscale4k) payload.upscale4k = true;
     this.socket.emit('message', payload);
   }
 

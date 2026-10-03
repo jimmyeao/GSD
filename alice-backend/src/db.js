@@ -52,7 +52,7 @@ db.exec(`
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
-    type            TEXT    NOT NULL CHECK(type IN ('video','image','slide','code')),
+    type            TEXT    NOT NULL CHECK(type IN ('video','image','slide','code','audio')),
     filename        TEXT    NOT NULL,
     original_name   TEXT,
     title           TEXT,
@@ -96,6 +96,34 @@ try { db.exec("ALTER TABLE users ADD COLUMN display_name TEXT"); } catch { /* al
 try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"); } catch { /* already exists */ }
 try { db.exec("ALTER TABLE users ADD COLUMN auth_provider TEXT"); } catch { /* already exists */ }
 try { db.exec("ALTER TABLE users ADD COLUMN provider_subject TEXT"); } catch { /* already exists */ }
+
+// Migration: allow 'audio' in assets.type (MusicAgent) — SQLite can't ALTER
+// a CHECK constraint directly, so rebuild the table if an existing DB still
+// has the old constraint (CREATE TABLE IF NOT EXISTS above only applies to
+// a fresh DB; this handles the already-live one from earlier today).
+{
+  const assetsSql = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='assets'").get();
+  if (assetsSql && !assetsSql.sql.includes("'audio'")) {
+    db.exec(`
+      ALTER TABLE assets RENAME TO assets_old;
+      CREATE TABLE assets (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+        type            TEXT    NOT NULL CHECK(type IN ('video','image','slide','code','audio')),
+        filename        TEXT    NOT NULL,
+        original_name   TEXT,
+        title           TEXT,
+        size_bytes      INTEGER,
+        created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO assets SELECT * FROM assets_old;
+      DROP TABLE assets_old;
+      CREATE INDEX IF NOT EXISTS idx_assets_user ON assets(user_id, created_at DESC);
+    `);
+    console.log('[db] migrated assets.type CHECK constraint to include audio');
+  }
+}
 
 try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_provider ON users(auth_provider, provider_subject)"); } catch { /* ok */ }
 try { db.exec("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_email ON users(email)"); } catch { /* ok */ }
@@ -154,6 +182,60 @@ db.exec(`
     note       TEXT,
     created_at TEXT    NOT NULL DEFAULT (datetime('now'))
   );
+`);
+
+// ── Memory facts (lightweight extracted entity/attribute/value store) ─
+db.exec(`
+  CREATE TABLE IF NOT EXISTS memory_facts (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id                INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    entity                 TEXT    NOT NULL COLLATE NOCASE,
+    attribute              TEXT    NOT NULL,
+    value                  TEXT    NOT NULL,
+    source_conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    confidence             REAL    NOT NULL DEFAULT 0.7 CHECK(confidence >= 0 AND confidence <= 1),
+    status                 TEXT    NOT NULL DEFAULT 'active' CHECK(status IN ('active','superseded','rejected')),
+    created_at             TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at             TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_memory_facts_user_entity ON memory_facts(user_id, entity);
+
+  -- Enforces exactly one active row per (user, entity, attribute); superseding
+  -- a fact keeps history instead of overwriting it.
+  CREATE UNIQUE INDEX IF NOT EXISTS ux_memory_facts_active_triple
+    ON memory_facts(user_id, entity, attribute) WHERE status = 'active';
+`);
+
+// ── Mail contact/thread cache (avoid re-fetching live on every turn) ──
+db.exec(`
+  CREATE TABLE IF NOT EXISTS mail_contact_cache (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id           INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    email                TEXT    NOT NULL COLLATE NOCASE,
+    display_name         TEXT,
+    last_message_id      TEXT,
+    last_message_date    TEXT,
+    last_subject         TEXT,
+    message_count_cached INTEGER NOT NULL DEFAULT 0,
+    refreshed_at         TEXT    NOT NULL DEFAULT (datetime('now')),
+    created_at           TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(account_id, email)
+  );
+  CREATE INDEX IF NOT EXISTS idx_mail_contact_cache_account ON mail_contact_cache(account_id);
+
+  CREATE TABLE IF NOT EXISTS mail_thread_cache (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id        INTEGER NOT NULL REFERENCES mail_accounts(id) ON DELETE CASCADE,
+    thread_id         TEXT    NOT NULL,
+    subject           TEXT,
+    participants      TEXT,
+    message_summaries TEXT,
+    last_message_date TEXT,
+    refreshed_at      TEXT    NOT NULL DEFAULT (datetime('now')),
+    created_at        TEXT    NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(account_id, thread_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_mail_thread_cache_account ON mail_thread_cache(account_id);
 `);
 
 // Prepared statements
@@ -344,6 +426,79 @@ const stmts = {
   deleteContainer: db.prepare('DELETE FROM containers WHERE id = ? AND user_id = ?'),
   countUserContainers: db.prepare('SELECT COUNT(*) as count FROM containers WHERE user_id = ? AND status IN (\'created\',\'running\')'),
   cleanStaleContainers: db.prepare('DELETE FROM containers WHERE user_id = ? AND docker_id IS NULL'),
+
+  // Memory facts
+  insertMemoryFact: db.prepare(
+    `INSERT INTO memory_facts (user_id, entity, attribute, value, source_conversation_id, confidence)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ),
+  getActiveFact: db.prepare(
+    `SELECT * FROM memory_facts
+      WHERE user_id = ? AND entity = ? COLLATE NOCASE AND attribute = ? AND status = 'active'`
+  ),
+  supersedeFact: db.prepare(
+    "UPDATE memory_facts SET status = 'superseded', updated_at = datetime('now') WHERE id = ?"
+  ),
+  touchFactConfidence: db.prepare(
+    "UPDATE memory_facts SET confidence = ?, updated_at = datetime('now') WHERE id = ?"
+  ),
+  listActiveEntities: db.prepare(
+    "SELECT DISTINCT entity FROM memory_facts WHERE user_id = ? AND status = 'active'"
+  ),
+  factsForEntity: db.prepare(
+    `SELECT entity, attribute, value, confidence, updated_at FROM memory_facts
+      WHERE user_id = ? AND entity = ? COLLATE NOCASE AND status = 'active'
+      ORDER BY updated_at DESC`
+  ),
+
+  // Mail contact/thread cache
+  upsertMailContact: db.prepare(
+    `INSERT INTO mail_contact_cache
+       (account_id, email, display_name, last_message_id, last_message_date, last_subject, message_count_cached, refreshed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(account_id, email) DO UPDATE SET
+       display_name         = excluded.display_name,
+       last_message_id      = excluded.last_message_id,
+       last_message_date    = excluded.last_message_date,
+       last_subject         = excluded.last_subject,
+       message_count_cached = excluded.message_count_cached,
+       refreshed_at         = datetime('now')`
+  ),
+  getMailContact: db.prepare(
+    'SELECT * FROM mail_contact_cache WHERE account_id = ? AND email = ? COLLATE NOCASE'
+  ),
+  listMailContactsByAccount: db.prepare(
+    'SELECT * FROM mail_contact_cache WHERE account_id = ?'
+  ),
+  deleteMailContact: db.prepare(
+    'DELETE FROM mail_contact_cache WHERE account_id = ? AND email = ? COLLATE NOCASE'
+  ),
+  upsertMailThread: db.prepare(
+    `INSERT INTO mail_thread_cache
+       (account_id, thread_id, subject, participants, message_summaries, last_message_date, refreshed_at)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT(account_id, thread_id) DO UPDATE SET
+       subject           = excluded.subject,
+       participants      = excluded.participants,
+       message_summaries = excluded.message_summaries,
+       last_message_date = excluded.last_message_date,
+       refreshed_at      = datetime('now')`
+  ),
+  getMailThread: db.prepare(
+    'SELECT * FROM mail_thread_cache WHERE account_id = ? AND thread_id = ?'
+  ),
+  listMailThreadsByAccount: db.prepare(
+    'SELECT * FROM mail_thread_cache WHERE account_id = ?'
+  ),
+  deleteMailThread: db.prepare(
+    'DELETE FROM mail_thread_cache WHERE account_id = ? AND thread_id = ?'
+  ),
+  deleteMailContactsByAccount: db.prepare(
+    'DELETE FROM mail_contact_cache WHERE account_id = ?'
+  ),
+  deleteMailThreadsByAccount: db.prepare(
+    'DELETE FROM mail_thread_cache WHERE account_id = ?'
+  ),
 };
 
 // ── Bootstrap: seed admin allowlist entry on first boot ─────────────
