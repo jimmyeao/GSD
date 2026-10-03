@@ -8,12 +8,14 @@ import { config } from './config.js';
 import { getAgent } from './agents/registry.js';
 import { streamCompletion, complete, LLMUnavailableError } from './agents/llmClient.js';
 import { generateImage } from './agents/comfyClient.js';
-import { generateVideo, generateI2V } from './agents/videoClient.js';
+import { generateVideo, generateI2V, generateFL2V, generateRef2V, composeRef2VAPrompt, estimateDurationFromScript, looksLikeH3Script, looksLikeLTXScript, generateLTXVideo, generateLTXI2V, generateLTXFL2V, parseScriptChunks, generateChainedVideo } from './agents/videoClient.js';
+import { generateMusic } from './agents/musicClient.js';
 import { ensureComfyRunning, freeComfyMemory } from './comfyManager.js';
 import { routeByKeyword, routeWithLLM } from './router.js';
 import { buildPptx, parseSlideResponse } from './agents/slideBuilder.js';
 import { resolveVisuals } from './orchestrator.js';
 import { stmts, expireStaleApprovals } from './db.js';
+import { getMemoryContext, extractFactsAsync } from './memory.js';
 import { runMailAgent, executeApprovedAction, summariseExecution, isCompoundRequest } from './agents/mailAgent.js';
 import { socketAuth, csrfProtect, userFromRequest } from './auth.js';
 import { handleUpgrade as handlePreviewUpgrade } from './routes/preview.js';
@@ -26,8 +28,11 @@ import sandboxRoutes from './routes/sandbox.js';
 import previewRoutes from './routes/preview.js';
 import adminRoutes from './routes/admin.js';
 import mailRoutes from './routes/mail.js';
+import agentRoutes from './routes/agent.js';
+import openaiRoutes from './routes/openai.js';
 import { isTokenKeyValid } from './mail/tokens.js';
-import { mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync, statSync, renameSync } from 'node:fs';
+import { execFile } from 'node:child_process';
 
 const app = express();
 // Backend runs behind NGINX which terminates TLS; always bind plain HTTP.
@@ -70,6 +75,18 @@ httpServer.on('upgrade', (req, socket, head) => {
 app.use(cookieParser(config.sessionSecret || config.jwtSecret || 'alice-unsigned'));
 app.use(cors(corsConfig));
 app.use(express.json({ limit: '10mb' }));
+
+// External agent API (/agent/* → /api/agent/* via NGINX) — mounted BEFORE
+// csrfProtect since it authenticates via requireApiKey (shared secret), not
+// a browser session, and CSRF's double-submit-cookie contract assumes a
+// cookie-bearing browser caller an external tool doesn't have.
+app.use('/agent', agentRoutes);
+
+// OpenAI-compatible surface (/v1/* → /api/v1/* via NGINX) — same
+// requireApiKey contract and same reason for mounting before csrfProtect
+// as /agent above (see openai.js header).
+app.use('/v1', openaiRoutes);
+
 // Double-submit-cookie CSRF — checked on mutating requests only.
 app.use(csrfProtect);
 
@@ -190,7 +207,7 @@ io.use(socketAuth);
 io.on('connection', (socket) => {
   console.log(`[ws] connected: ${socket.id} (user: ${socket.user.username})`);
 
-  socket.on('message', async ({ agent: requestedAgent, content, history = [], conversationId, imageData }) => {
+  socket.on('message', async ({ agent: requestedAgent, content, history = [], conversationId, imageData, lastFrameData, videoMode, videoModel, imageModel, imageAspect, upscale4k, references, lyrics, musicSeconds, chainImagesData }) => {
     if (!content?.trim()) return;
 
     let agentId = requestedAgent;
@@ -232,13 +249,23 @@ io.on('connection', (socket) => {
 
     // ── ImageAgent via ComfyUI ─────────────────────────────────────
     if (agentId === 'ImageAgent') {
-      await handleImageAgent(socket, content, convId, agentId);
+      await handleImageAgent(socket, content, convId, agentId, imageModel, imageAspect, upscale4k);
       return;
     }
 
-    // ── VideoAgent via ComfyUI (LTX-2) ───────────────────────────
+    // ── VideoAgent via ComfyUI (MiniMax H3 or LTX-2.5) ───────────
     if (agentId === 'VideoAgent') {
-      await handleVideoAgent(socket, content, convId, imageData);
+      if (videoMode === 'chain') {
+        await handleChainedVideoAgent(socket, content, convId, chainImagesData);
+        return;
+      }
+      await handleVideoAgent(socket, content, convId, imageData, lastFrameData, videoMode, references, videoModel);
+      return;
+    }
+
+    // ── MusicAgent via ComfyUI (ACE-Step 1.5) ────────────────────
+    if (agentId === 'MusicAgent') {
+      await handleMusicAgent(socket, content, convId, lyrics, musicSeconds);
       return;
     }
 
@@ -255,8 +282,13 @@ io.on('connection', (socket) => {
     }
 
     // ── LLM streaming ─────────────────────────────────────────────
-    const modelCfg = config.models[agentDef.model];
-    const messages = buildMessages(agentDef.systemPrompt, history, content);
+    // An attached image reaching this generic path means the agent isn't
+    // one of ImageAgent/VideoAgent (they returned above) — route this turn
+    // through the vision model instead so it can actually see the image,
+    // rather than silently ignoring it like every other model here does.
+    const modelCfg = imageData ? config.models.vision : config.models[agentDef.model];
+    let messages = buildMessages(agentDef.systemPrompt, history, content, getMemoryContext(socket.user.id, content));
+    if (imageData) messages = attachImageToMessages(messages, imageData);
 
     let fullResponse = '';
     const streamAbort = new AbortController();
@@ -271,7 +303,10 @@ io.on('connection', (socket) => {
         {
           signal: streamAbort.signal,
           onThinking: () => socket.emit('thinking', {}),
-          noThink: agentDef.noThink ?? false,
+          // qwen2.5vl (the vision route) isn't a reasoning model — Ollama
+          // rejects reasoning_effort outright for it ("does not support
+          // thinking") rather than ignoring it, so never send it here.
+          noThink: imageData ? false : (agentDef.noThink ?? false),
         },
       );
 
@@ -285,6 +320,12 @@ io.on('connection', (socket) => {
       if (fullResponse) {
         stmts.insertMessage.run(convId, 'assistant', agentId, fullResponse);
         stmts.touchConversation.run(convId);
+        // Only extract from a genuinely-completed turn — a user-stopped
+        // stream can be truncated mid-sentence, which is a bad extraction input.
+        if (!streamAbort.signal.aborted) {
+          extractFactsAsync(socket.user.id, convId, content, fullResponse)
+            .catch(err => console.error('[memory] extract error:', err.message));
+        }
       }
 
       socket.emit('done', { agent: agentId });
@@ -570,7 +611,7 @@ Then WAIT for the user to say "continue" before doing the next full rewrite.`;
       if (config.demoMode) { await streamDemo(socket, 'CoderAgent', content, undefined, convId); return; }
 
       const modelCfg = config.models.coder;
-      const messages = buildMessages(systemPrompt, history, content);
+      const messages = buildMessages(systemPrompt, history, content, getMemoryContext(socket.user.id, content));
       let fullResponse = '';
 
       // Abort the stream if the client stays disconnected past a grace period.
@@ -998,14 +1039,32 @@ function parseEditBlocks(text) {
   return blocks;
 }
 
-function buildMessages(systemPrompt, history, userContent) {
+function buildMessages(systemPrompt, history, userContent, memoryContext = '') {
   const messages = [];
   if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+  if (memoryContext) messages.push({ role: 'system', content: memoryContext });
   for (const h of history.slice(-10)) {
     if (h.role && h.content) messages.push({ role: h.role, content: h.content });
   }
   messages.push({ role: 'user', content: userContent });
   return messages;
+}
+
+// Rewrites the last (user) message into OpenAI-style multimodal content so a
+// vision-capable model can actually see an attached image — plain text
+// agents otherwise never receive image bytes at all (see config.models.vision).
+function attachImageToMessages(messages, imageData) {
+  const last = messages[messages.length - 1];
+  return [
+    ...messages.slice(0, -1),
+    {
+      ...last,
+      content: [
+        { type: 'text', text: last.content },
+        { type: 'image_url', image_url: { url: imageData.dataUrl } },
+      ],
+    },
+  ];
 }
 
 const DEFAULT_NEGATIVE = [
@@ -1060,18 +1119,29 @@ async function enhanceGeneralPrompt(userPrompt) {
       { signal: AbortSignal.timeout(ENHANCE_TIMEOUT_MS), numPredict: ENHANCE_NUM_PREDICT },
     );
     return { positive: enhanced.trim() || userPrompt };
-  } catch {
+  } catch (err) {
+    console.error('[enhanceGeneralPrompt] falling back to original prompt:', err.message);
     return { positive: userPrompt };
   }
 }
 
-async function enhanceVideoPrompt(userPrompt) {
-  // Structure and rules per LTX's own LTX-2.3 prompting guide
+// Mode-specific addenda for enhanceVideoPrompt — i2v/fl2v already have an
+// image anchoring the start/end frame, so the rewrite shouldn't waste words
+// re-describing what's already visually specified; it should focus on the
+// motion instead.
+const LTX_MODE_ADDENDUM = {
+  t2v: '',
+  i2v: '\nThe video starts from a provided reference image — do not re-describe its exact appearance/framing in detail, focus the rewrite on the motion and action that unfolds from it.',
+  fl2v: '\nThe video is generated between two provided keyframes — describe the motion connecting them, not static descriptions of either keyframe.',
+};
+
+async function enhanceVideoPrompt(userPrompt, mode = 't2v') {
+  // Structure and rules per LTX's own LTX-2.5 prompting guide
   // (ltx.io/blog/ltx-2-3-prompt-guide): subject first, then explicit motion,
   // then camera behaviour, then visual tone/style last; describe how the
   // subject looks once camera movement completes; one main scene idea only
   // ("too many competing details can make the result feel unfocused" — this
-  // matches our own finding that LTX-2.3 reliably handles ~1-2 distinct
+  // matches our own finding that LTX-2.5 reliably handles ~1-2 distinct
   // subjects and degrades hard past that, e.g. 5 cars renders as 3 look-alike
   // cars swapping places); long, specific prompts outperform short vague
   // ones; audio quality is much improved in 2.3 so it's worth explicitly
@@ -1079,16 +1149,16 @@ async function enhanceVideoPrompt(userPrompt) {
   const messages = [
     {
       role: 'system',
-      content: `You are an expert prompt engineer for LTX-2.3 text-to-video generation (10-20 second clips with synchronized audio).
+      content: `You are an expert prompt engineer for LTX-2.5 text-to-video generation (10-20 second clips with synchronized audio).
 Rewrite the user's idea as a single dense prompt clause for video generation — NOT a script, NOT a screenplay, NOT a shot list.
 
 Follow this order: (1) main subject named clearly, (2) explicit motion/action — what happens, not vague qualities, (3) camera behaviour if relevant, (4) visual tone/style last.
 Camera vocabulary to draw from: follows, tracks, pans across, circles around, tilts upward, pushes in, pulls back, overhead view, handheld movement, over-the-shoulder, wide establishing shot, static frame. Describe how the subject appears once the camera movement completes, not just the movement itself.
-Audio matters as much as visuals now — always include a clause describing the acoustic environment, ambient sound, and/or music that matches the scene (LTX-2.3 generates real synchronized audio from this).
-Keep to ONE main subject/scene idea. Do not ask for more than 1-2 distinct simultaneous characters or objects doing independent things — LTX-2.3 reliably tracks 1-2 subjects and visibly loses count/identity (duplicating, merging, or swapping) past that, no matter how the request is phrased. If the user's idea has 3+ simultaneous subjects, pick the most important 1-2 and drop or background the rest rather than trying to render all of them distinctly.
+Audio matters as much as visuals now — always include a clause describing the acoustic environment, ambient sound, and/or music that matches the scene (LTX-2.5 generates real synchronized audio from this).
+Keep to ONE main subject/scene idea. Do not ask for more than 1-2 distinct simultaneous characters or objects doing independent things — LTX-2.5 reliably tracks 1-2 subjects and visibly loses count/identity (duplicating, merging, or swapping) past that, no matter how the request is phrased. If the user's idea has 3+ simultaneous subjects, pick the most important 1-2 and drop or background the rest rather than trying to render all of them distinctly.
 When describing people walking or moving, phrase it in WORLD-FRAME terms (e.g. "a figure striding forward through the plaza", "a pedestrian crossing the street left to right") — NOT treadmill phrasing like "a person walking" with no path, which renders as bobbing in place with warped detail rather than real translation through the scene.
 Do NOT include: dialogue, voiceover, scene numbers, [VISUAL:]/[VOICEOVER:] tags, multiple scenes, narration.
-Return ONLY the improved prompt as one dense paragraph. No preamble, no quotes, no markdown.` + NO_SECOND_GUESSING,
+Return ONLY the improved prompt as one dense paragraph. No preamble, no quotes, no markdown.${LTX_MODE_ADDENDUM[mode] || ''}` + NO_SECOND_GUESSING,
     },
     { role: 'user', content: userPrompt },
   ];
@@ -1100,7 +1170,8 @@ Return ONLY the improved prompt as one dense paragraph. No preamble, no quotes, 
       { signal: AbortSignal.timeout(ENHANCE_TIMEOUT_MS), numPredict: ENHANCE_NUM_PREDICT },
     );
     return { positive: enhanced.trim() || userPrompt };
-  } catch {
+  } catch (err) {
+    console.error('[enhanceVideoPrompt] falling back to original prompt:', err.message);
     return { positive: userPrompt };
   }
 }
@@ -1138,7 +1209,8 @@ Rules for negative: always include anatomy issues (extra fingers, missing finger
     }
     // Plain text fallback (no JSON returned)
     return { positive: raw.trim() || userPrompt, negative: DEFAULT_NEGATIVE };
-  } catch {
+  } catch (err) {
+    console.error('[enhanceImagePrompt] falling back to original prompt:', err.message);
     return { positive: userPrompt, negative: DEFAULT_NEGATIVE };
   }
 }
@@ -1160,14 +1232,18 @@ function assetUrl(_socket, assetId) {
   return `/api/assets/${assetId}/file`;
 }
 
-async function handleImageAgent(socket, prompt, convId, agentId) {
+async function handleImageAgent(socket, prompt, convId, agentId, imageModel, imageAspect, upscale4k) {
   let fullResponse = '';
   // Try ComfyUI first
   try {
     socket.emit('token', { token: `Starting ComfyUI and generating image…\n\n` });
     fullResponse += `Generating image…\n\n`;
     await ensureComfyRunning();
-    const imgData = await generateImage(config.models.comfyui.endpoint, prompt, DEFAULT_NEGATIVE, config.models.comfyui.timeout);
+    // Flux.2 Dev is a 32B model — much heavier than ERNIE Turbo (8 steps) or
+    // the SD fallback, so it gets its own longer budget rather than the
+    // default 120s (config.models.comfyui.timeout) which is tuned for those.
+    const timeoutMs = imageModel === 'flux2' ? 600_000 : config.models.comfyui.timeout;
+    const imgData = await generateImage(config.models.comfyui.endpoint, prompt, DEFAULT_NEGATIVE, timeoutMs, imageModel, imageAspect, upscale4k);
 
     // Cache image locally as a per-user asset
     let imgUrl;
@@ -1240,20 +1316,117 @@ async function handleImageAgent(socket, prompt, convId, agentId) {
   }
 }
 
-async function handleVideoAgent(socket, prompt, convId, imageData) {
+async function handleVideoAgent(socket, prompt, convId, imageData, lastFrameData, videoMode, references, videoModel) {
   let fullResponse = '';
-  const isI2V = !!imageData;
+  const isLTX = videoModel === 'ltx';
+  // LTX has no reference mode — if the frontend combo somehow lets this
+  // through anyway, fall back to whatever's actually attached rather than
+  // erroring (the mode selector is the primary guard, this is just belt and
+  // suspenders).
+  const isRef2VA = !isLTX && videoMode === 'ref2va';
+  const isFL2V = !isRef2VA && !!(imageData && lastFrameData);
+  const isI2V = !isRef2VA && !!imageData && !isFL2V;
   try {
-    const mode = isI2V ? 'image-to-video with LTX-2.3' : 'text-to-video with LTX-2.3';
-    const msg1 = `Starting ComfyUI and generating ${mode}... This may take a few minutes.\n\n`;
+    const modelLabel = isLTX ? 'LTX-2.5' : 'MiniMax H3';
+    const modeLabel = isRef2VA ? `a character/style-reference video with ${modelLabel}`
+      : isFL2V ? `first/last-frame video with ${modelLabel}`
+      : isI2V ? `image-to-video with ${modelLabel}`
+      : `text-to-video with ${modelLabel}`;
+    const msg1 = `Starting ComfyUI and generating ${modeLabel}... This may take a few minutes.\n\n`;
     socket.emit('token', { token: msg1 });
     fullResponse += msg1;
 
+    // LTX only: expand a rough description into LTX-2.5's best-practice
+    // prompt form (see enhanceVideoPrompt, already used by the manual
+    // "Optimise" button) and read it back into chat before generating —
+    // mirrors the H3-Promptor flow below, but as a plain pre-flight LLM call
+    // since LTX has no equivalent ComfyUI-side node to chain. Skipped for
+    // already-structured VideoScriptAgent LTX scripts to avoid double-processing.
+    // Must run BEFORE ensureComfyRunning() — that call pauses the LLM
+    // backend (comfyManager.js's pauseLLMBackends()) almost immediately to
+    // free VRAM for ComfyUI, so running this "concurrently" with comfy
+    // startup made the LLM call fail (litellm gateway unreachable) — this bit
+    // us on the very first live test.
+    let effectivePrompt = prompt;
+    if (isLTX && !looksLikeLTXScript(prompt)) {
+      const mode = isFL2V ? 'fl2v' : isI2V ? 'i2v' : 't2v';
+      const expanded = await enhanceVideoPrompt(prompt, mode);
+      if (expanded.positive && expanded.positive.trim() !== prompt.trim()) {
+        effectivePrompt = expanded.positive;
+        const msg = `📝 **Expanded for LTX-2.5:**\n\n${effectivePrompt}\n\n---\n\n`;
+        socket.emit('token', { token: msg });
+        fullResponse += msg;
+      }
+    }
+
     await ensureComfyRunning();
-    // Both now run the same two-pass LTX-2.3 pipeline, so same timeout budget.
-    const vidData = isI2V
-      ? await generateI2V(config.models.comfyui.endpoint, prompt, imageData, 1_200_000) // 20 min
-      : await generateVideo(config.models.comfyui.endpoint, prompt, 1_200_000);        // 20 min
+    // Live sampling progress (with an ETA once a couple of steps have run) —
+    // ephemeral, like SlideAgent's visual-generation progress lines above;
+    // not persisted into fullResponse/chat history.
+    const onProgress = (msg) => socket.emit('token', { token: `> ${msg}\n` });
+
+    // MiniMax H3 only: expand a rough description into H3's structured
+    // prompt format via the H3-Promptor node before generating, and read the
+    // result back into chat as soon as it's ready (well before the render
+    // finishes). Skipped for Ref2VA (its prompt carries literal reference
+    // tags an LLM rewrite could mangle) and for already-structured scripts
+    // (e.g. from VideoScriptAgent) to avoid double-processing.
+    const usePromptor = !isLTX && !isRef2VA && !looksLikeH3Script(prompt);
+    const taskTypeLabel = isFL2V ? 'First-and-Last-Frame-to-Video (FL2VA)'
+      : isI2V ? 'Image-to-Video (I2V)'
+      : 'Text-to-Video (T2V)';
+    const onPromptExpanded = (text) => {
+      const msg = `📝 **H3-Promptor expanded your prompt:**\n\n${text}\n\n---\n\n`;
+      socket.emit('token', { token: msg });
+      fullResponse += msg;
+    };
+
+    // Render for as long as the script actually describes (via its [Shot N]
+    // At MM:SS.mmm timestamps) rather than always the fixed default duration
+    // — otherwise a shorter script (e.g. a 5s logo reveal) still rendered a
+    // full-length clip with unscripted, unguided seconds tacked on the end
+    // (2026-08-09 incident). Falls back to each model's own default when the
+    // prompt has no timestamps (e.g. a bare unscripted request). Model-agnostic.
+    const inferredDuration = estimateDurationFromScript(prompt) ?? undefined;
+
+    let vidData;
+    if (isLTX) {
+      // LTX's distilled 2-pass pipeline is far faster than H3's — a real
+      // default-length job measured well under 20 min before today's H3
+      // migration, so keep that historical budget rather than H3's 90 min.
+      const LTX_TIMEOUT_MS = 1_200_000; // 20 min
+      if (isFL2V) {
+        vidData = await generateLTXFL2V(config.models.comfyui.endpoint, effectivePrompt, imageData, lastFrameData, LTX_TIMEOUT_MS, inferredDuration, undefined, undefined, onProgress);
+      } else if (isI2V) {
+        vidData = await generateLTXI2V(config.models.comfyui.endpoint, effectivePrompt, imageData, LTX_TIMEOUT_MS, inferredDuration, undefined, undefined, onProgress);
+      } else {
+        vidData = await generateLTXVideo(config.models.comfyui.endpoint, effectivePrompt, LTX_TIMEOUT_MS, inferredDuration, undefined, undefined, onProgress);
+      }
+    } else {
+      // A real default-length H3 generation (294 frames, 20 steps) measured
+      // ~50-60 min on this hardware without Sage Attention (2026-08-09) — 20
+      // min guaranteed a timeout on every single default-settings job.
+      // Bumped 90->120 min (2026-09-01): multi-reference Ref2VA jobs (e.g.
+      // 5 reference images) were observed exceeding 72 min and hitting the
+      // old 90 min ceiling. Bumped 120->230 min (2026-09-07): a Ref2VA job
+      // measured ~395s/step (vs. the usual ~9s/step baseline) hit the 120
+      // min ceiling at step 18/20 — still actively sampling, not stuck.
+      const H3_TIMEOUT_MS = 13_800_000; // 230 min
+      if (isRef2VA) {
+        const refs = references || [];
+        const refImages = refs.filter(r => r.kind !== 'audio');
+        const refAudios = refs.filter(r => r.kind === 'audio');
+        const composedPrompt = composeRef2VAPrompt(prompt, refs);
+        const ref2vaDuration = estimateDurationFromScript(composedPrompt) ?? undefined;
+        vidData = await generateRef2V(config.models.comfyui.endpoint, composedPrompt, refImages, refAudios, H3_TIMEOUT_MS, ref2vaDuration, undefined, undefined, onProgress);
+      } else if (isFL2V) {
+        vidData = await generateFL2V(config.models.comfyui.endpoint, prompt, imageData, lastFrameData, H3_TIMEOUT_MS, inferredDuration, undefined, undefined, onProgress, usePromptor, taskTypeLabel, onPromptExpanded);
+      } else if (isI2V) {
+        vidData = await generateI2V(config.models.comfyui.endpoint, prompt, imageData, H3_TIMEOUT_MS, inferredDuration, undefined, undefined, onProgress, usePromptor, taskTypeLabel, onPromptExpanded);
+      } else {
+        vidData = await generateVideo(config.models.comfyui.endpoint, prompt, H3_TIMEOUT_MS, inferredDuration, undefined, undefined, onProgress, usePromptor, taskTypeLabel, onPromptExpanded);
+      }
+    }
 
     // Move cached video to per-user assets directory
     const cachedPath = join(__dirname, '..', 'data', 'videos', vidData.filename);
@@ -1288,7 +1461,7 @@ async function handleVideoAgent(socket, prompt, convId, imageData) {
       || err.message.includes('fetch failed');
 
     if (isOffline) {
-      socket.emit('token', { token: '> ComfyUI is not running. Start ComfyUI with the LTX-2 model to generate videos.\n' });
+      socket.emit('token', { token: `> ComfyUI is not running. Start ComfyUI with the ${isLTX ? 'LTX-2.5' : 'MiniMax H3'} model to generate videos.\n` });
       socket.emit('done', { agent: 'VideoAgent' });
     } else {
       console.error('[VideoAgent] error:', err.message);
@@ -1297,10 +1470,223 @@ async function handleVideoAgent(socket, prompt, convId, imageData) {
   }
 }
 
+// Same venv ComfyUI itself runs in (comfyManager.js) — has PyAV already
+// installed, avoids a second Python env just for the merge step.
+const COMFYUI_PYTHON_BIN = `${process.env.COMFYUI_VENV_DIR ?? '/home/jimmy/comfyui-env'}/bin/python`;
+
+/**
+ * Chained multi-clip story mode: a script with "Chunk N — Title\n\"dialogue\""
+ * sections + one attached reference photo becomes a sequence of H3 clips —
+ * chunk 1 via Ref2VA (character reference = the photo), each subsequent
+ * chunk continuing from the exact last frame of the previous one (I2V) so
+ * the same person/environment carries forward. See generateChainedVideo in
+ * videoClient.js for the actual generation loop; this handler just streams
+ * progress/readback per chunk and merges the finished clips into one video.
+ */
+async function handleChainedVideoAgent(socket, script, convId, referenceImagesData) {
+  let fullResponse = '';
+  try {
+    if (!referenceImagesData || referenceImagesData.length === 0) {
+      throw new Error('Chained story mode needs at least one reference photo attached — either one character photo (old-style scripts), or one image per "Image: <filename>" line referenced in the script.');
+    }
+
+    const chunks = parseScriptChunks(script);
+    if (chunks.length === 0) {
+      throw new Error('Could not find any "Chunk N — Title" sections in the script. Expected format:\nChunk 1 — Title\nImage: filename.jpg\n"Dialogue text" (or "" for a silent B-roll cutaway)');
+    }
+
+    // Voice-driven dialogue (lip-syncing to the user's own recordings via
+    // Ref2VA's ref_audios) was tried and removed — measured near-zero
+    // cross-correlation between supplied recordings and generated audio, so
+    // that input isn't actually driving speech content in this integration.
+    // H3's default voice via plain dialogue tags is what's actually verified
+    // to work, so that's the only path now.
+    const msg1 = `Starting chained video generation: ${chunks.length} clips with MiniMax H3, carrying character/office consistency across each one (chunks with an "Image:" line cut to that shot directly; others chain from the previous chunk's last frame). Each clip renders in full before the next begins — this will take a while.\n\n`;
+    socket.emit('token', { token: msg1 });
+    fullResponse += msg1;
+
+    await ensureComfyRunning();
+    const onProgress = (msg) => socket.emit('token', { token: `> ${msg}\n` });
+
+    const chunkResults = [];
+    const muteJobs = [];
+    await generateChainedVideo(
+      config.models.comfyui.endpoint,
+      referenceImagesData,
+      chunks,
+      // durationSeconds intentionally omitted — each chunk's clip length is
+      // estimated from its own dialogue (estimateDialogueDuration). A fixed
+      // 8s budget here previously left ~0s of slack for longer lines,
+      // producing rushed/choppy/cut-off audio.
+      // steps back to the full default (20) — 10 wasn't enough to reliably
+      // resolve lip-movement detail, even though dialogue audio itself still
+      // generated fine (lips just weren't animating much of the time).
+      // Per-chunk timeout budget (bumped 90->120->230 min alongside
+      // H3_TIMEOUT_MS above, 2026-09-01/07) — chunks can involve an extra
+      // establish pass on top of the real generation, so the same headroom applies.
+      { width: 640, height: 384, upscaleTo1080p: false, timeoutMs: 13_800_000 },
+      (i, total) => {
+        const c = chunks[i];
+        const label = c.dialogue ? `"${c.dialogue}"` : `(silent B-roll${c.imageName ? `: ${c.imageName}` : ''})`;
+        const msg = `\n**Chunk ${i + 1}/${total}:** ${label}\n\n`;
+        socket.emit('token', { token: msg });
+        fullResponse += msg;
+      },
+      (i, text) => {
+        // Fenced code block, not raw text — the prompt contains literal tags
+        // like <Picture 1>/<d>...</d> that the chat's markdown renderer
+        // would otherwise parse as HTML (<Picture...> reads as an opening
+        // <picture> tag) and silently swallow, which is exactly what
+        // happened earlier and produced a misleading "broken prompt" report.
+        const msg = `📝 **Chunk ${i + 1} prompt:**\n\n\`\`\`\n${text}\n\`\`\`\n\n---\n\n`;
+        socket.emit('token', { token: msg });
+        fullResponse += msg;
+      },
+      (i, result) => {
+        chunkResults.push(result);
+        const msg = `✅ Chunk ${i + 1} done (${result.filename})\n\n`;
+        socket.emit('token', { token: msg });
+        fullResponse += msg;
+
+        // Mute each individual clip's leading-audio decoder-warmup artifact
+        // right away, not just at the final merge — otherwise inspecting any
+        // one chunk on its own still has the gibberish, since the merge-time
+        // mute only ever touched the combined output. Reuses concat_videos.py
+        // (a single input is a valid no-op concat, just re-encoded + muted).
+        // Fire-and-forget here; awaited via muteJobs before the merge step.
+        const clipPath = join(__dirname, '..', 'data', 'videos', result.filename);
+        const tmpPath = `${clipPath}.muted.mp4`;
+        muteJobs.push(new Promise((resolve) => {
+          execFile(
+            COMFYUI_PYTHON_BIN,
+            [join(__dirname, '..', 'scripts', 'concat_videos.py'), '--no-edge-fade', tmpPath, clipPath],
+            (err, stdout, stderr) => {
+              if (err) {
+                console.warn(`[ChainedVideoAgent] failed to mute chunk ${i + 1}: ${stderr || err.message}`);
+              } else {
+                try { renameSync(tmpPath, clipPath); } catch (e) {
+                  console.warn(`[ChainedVideoAgent] failed to replace chunk ${i + 1} with muted version: ${e.message}`);
+                }
+              }
+              resolve();
+            },
+          );
+        }));
+      },
+      onProgress,
+    );
+
+    await Promise.all(muteJobs);
+    freeComfyMemory();
+
+    // Merge all cached clips into one final video via PyAV (no ffmpeg on
+    // this machine — see scripts/concat_videos.py for why decode+re-encode
+    // was used over a raw packet-copy remux).
+    const videosDir = join(__dirname, '..', 'data', 'videos');
+    const clipPaths = chunkResults.map(r => join(videosDir, r.filename));
+    const mergedFilename = `alice_chain_${Date.now()}.mp4`;
+    const mergedPath = join(videosDir, mergedFilename);
+
+    const mergeMsg = `Merging ${clipPaths.length} clips into one final video...\n\n`;
+    socket.emit('token', { token: mergeMsg });
+    fullResponse += mergeMsg;
+
+    await new Promise((resolve, reject) => {
+      execFile(
+        COMFYUI_PYTHON_BIN,
+        [join(__dirname, '..', 'scripts', 'concat_videos.py'), mergedPath, ...clipPaths],
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`concat_videos.py failed: ${stderr || err.message}`));
+          else resolve(stdout);
+        },
+      );
+    });
+
+    const buffer = readFileSync(mergedPath);
+    const assetId = saveAsset(socket.user.id, convId, 'video', mergedFilename, buffer, script.slice(0, 80));
+    const videoUrl = assetUrl(socket, assetId);
+
+    // Clean up cached per-chunk clips + the merged temp file now it's saved as an asset
+    for (const p of clipPaths) { try { unlinkSync(p); } catch { /* ignore */ } }
+    try { unlinkSync(mergedPath); } catch { /* ignore */ }
+
+    const msg2 = `Chained video complete!\n\n[Download video](${videoUrl})\n\n<video controls width="640" src="${videoUrl}"></video>`;
+    socket.emit('token', { token: msg2 });
+    fullResponse += msg2;
+
+    if (convId) {
+      stmts.insertMessage.run(convId, 'assistant', 'VideoAgent', fullResponse);
+      stmts.touchConversation.run(convId);
+    }
+    socket.emit('done', { agent: 'VideoAgent' });
+    console.log(`[ChainedVideoAgent] generated ${mergedFilename} from ${chunkResults.length} chunks`);
+  } catch (err) {
+    freeComfyMemory();
+    console.error('[ChainedVideoAgent] error:', err.message);
+    socket.emit('error', { message: `Chained video generation error: ${err.message}` });
+  }
+}
+
+async function handleMusicAgent(socket, prompt, convId, lyrics, seconds) {
+  let fullResponse = '';
+  const targetSeconds = Number(seconds) > 0 ? Number(seconds) : 30;
+  try {
+    const msg1 = `Starting ComfyUI and generating ${targetSeconds}s of ${lyrics ? 'music with vocals' : 'instrumental music'}...\n\n`;
+    socket.emit('token', { token: msg1 });
+    fullResponse += msg1;
+
+    await ensureComfyRunning();
+    const onProgress = (msg) => socket.emit('token', { token: `> ${msg}\n` });
+    // ACE-Step turbo (8 steps, single pass) is fast — a generous but not
+    // excessive budget, nowhere near the H3/LTX video timeouts.
+    const MUSIC_TIMEOUT_MS = 600_000; // 10 min
+    const audioData = await generateMusic(config.models.comfyui.endpoint, prompt, lyrics || '', targetSeconds, MUSIC_TIMEOUT_MS, onProgress);
+
+    // Move cached audio to per-user assets directory
+    const cachedPath = join(__dirname, '..', 'data', 'audio', audioData.filename);
+    let audioUrl;
+    try {
+      const { readFileSync } = await import('node:fs');
+      const buffer = readFileSync(cachedPath);
+      const assetId = saveAsset(socket.user.id, convId, 'audio', audioData.filename, buffer, prompt.slice(0, 80));
+      audioUrl = assetUrl(socket, assetId);
+      try { unlinkSync(cachedPath); } catch { /* ignore */ }
+    } catch {
+      audioUrl = `/api/audio/${encodeURIComponent(audioData.filename)}`;
+    }
+
+    freeComfyMemory();
+
+    const msg2 = `Music generated successfully!\n\n[Download audio](${audioUrl})\n\n<audio controls src="${audioUrl}"></audio>`;
+    socket.emit('token', { token: msg2 });
+    fullResponse += msg2;
+
+    if (convId) {
+      stmts.insertMessage.run(convId, 'assistant', 'MusicAgent', fullResponse);
+      stmts.touchConversation.run(convId);
+    }
+    socket.emit('done', { agent: 'MusicAgent' });
+    console.log(`[MusicAgent] generated ${audioData.filename}`);
+  } catch (err) {
+    freeComfyMemory(); // ensure VRAM is freed on error too
+    const isOffline = err.code === 'ECONNREFUSED'
+      || err.cause?.code === 'ECONNREFUSED'
+      || err.message.includes('fetch failed');
+
+    if (isOffline) {
+      socket.emit('token', { token: '> ComfyUI is not running. Start ComfyUI with the ACE-Step model to generate music.\n' });
+      socket.emit('done', { agent: 'MusicAgent' });
+    } else {
+      console.error('[MusicAgent] error:', err.message);
+      socket.emit('error', { message: `MusicAgent error: ${err.message}` });
+    }
+  }
+}
+
 async function handleSlideAgent(socket, prompt, history, convId) {
   const agentDef = getAgent('SlideAgent');
   const modelCfg = config.models[agentDef.model];
-  const messages = buildMessages(agentDef.systemPrompt, history, prompt);
+  const messages = buildMessages(agentDef.systemPrompt, history, prompt, getMemoryContext(socket.user.id, prompt));
 
   socket.emit('token', { token: 'Generating presentation...\n\n' });
 

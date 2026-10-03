@@ -8,51 +8,37 @@
  *  4. Shuts down ComfyUI after an idle timeout
  *
  * ComfyUI's real checkpoints (LTX-2 video, Flux2 image) need up to ~53GB of
- * transient memory — far more headroom than the persistent vLLM chat
- * backends leave free on this unified-memory box. vLLM's sleep-mode was
- * investigated and ruled out (unreliable on unified memory, dev-only HTTP
- * surface, open DGX-Spark crash bug) — so instead we fully stop the vLLM
- * containers before a ComfyUI job and restart them after. Chat agents will
- * return LLMUnavailableError for the duration; accepted tradeoff since
- * generation jobs are occasional, not constant, chat traffic.
+ * transient memory — far more headroom than the persistent vLLM chat backend
+ * leaves free on this unified-memory box. vLLM's sleep-mode was investigated
+ * and ruled out (unreliable on unified memory, dev-only HTTP surface, open
+ * DGX-Spark crash bug) — so instead we fully stop vllm-laguna before a
+ * ComfyUI job and restart it after, swapping litellm-gateway's config so
+ * chat agents fail over to a small Ollama model for the duration rather than
+ * hard-erroring. Generation jobs are occasional, not constant, chat traffic.
  *
- * IMPORTANT: spark-vllm-docker's launch-cluster.sh always runs its containers
- * with `docker run --rm` (hardcoded, no override flag) — so `docker stop`
- * DELETES them, not just stops them. `docker start` on a since-removed
- * container is a silent no-op failure. So "resume" here means fully
- * re-running each backend's launch command from scratch, not `docker start`.
- * (Confirmed the hard way: a stop cycle without this fix left both LLM
- * backends gone until manually relaunched.)
+ * History: this used to separately manage two spark-vllm-docker `--rm`
+ * containers (alice-vllm-mail on :8003, alice-vllm-coder on :8002) — those
+ * were retired in favor of routing every chat role (general/coder/mail, plus
+ * AliceBuilder's own CCR/Continue/OpenHands and TheiaCast's theia-assistant)
+ * through the single vllm-laguna container that AliceBuilder's
+ * docker-compose.yml manages. A prior version of this file paused those two
+ * containers on ComfyUI jobs but had no idea vllm-laguna existed — it kept
+ * running the whole time, and the combined memory pressure (ComfyUI + a
+ * fully-resident vllm-laguna + a stuck backend relaunch) hard-crashed the box
+ * on 2026-08-01, needing a physical reboot. Do not reintroduce a second,
+ * uncoordinated LLM-pause mechanism outside this file.
+ *
+ * vllm-laguna is docker-compose managed (`restart: unless-stopped`, NOT
+ * `--rm`) — `docker stop` does not remove it, so resume is a cheap
+ * `docker start`, not a full relaunch.
  */
 
 import { spawn, execFile } from 'node:child_process';
 import { config } from './config.js';
 
-// Each LLM backend's full (re)launch command — same one used to originally
-// stand it up. `docker stop` removes these containers (see note above), so
-// resume must re-run the launch command, not `docker start`.
-const LLM_BACKENDS = {
-  'alice-vllm-mail': {
-    port: 8003,
-    launchCmd: 'cd /home/jimmy/spark-vllm-docker && python3 run-recipe.py nemotron-3-nano-nvfp4 --solo --gpu-memory-utilization 0.24 --max-model-len 32768 --name alice-vllm-mail -p 127.0.0.1:8003:8000 -d -- --served-model-name nemotron-3-nano --max-num-seqs 4',
-  },
-  'alice-vllm-coder': {
-    port: 8002,
-    // Also serves the "general" role — see litellm config.yaml (alice-general
-    // and theia-assistant both point at this same backend).
-    launchCmd: 'cd /home/jimmy/spark-vllm-docker && python3 run-recipe.py qwen3.6-35b-a3b-nvfp4-no-mtp --solo --tensor-parallel 1 --gpu-memory-utilization 0.28 --max-model-len 32768 --name alice-vllm-coder -p 127.0.0.1:8002:8000 -d -- --served-model-name qwen3.6-coder',
-  },
-};
-const LLM_RESTART_HEALTH_TIMEOUT = 300_000; // per-container cap while waking backends back up (cold model load, not just a process start)
-
-function dockerStop(name) {
-  return new Promise((resolve) => {
-    execFile('docker', ['stop', name], (err) => {
-      if (err) console.warn(`[comfyManager] docker stop ${name} failed (may already be stopped/removed): ${err.message}`);
-      resolve();
-    });
-  });
-}
+const LITELLM_DIR = '/home/jimmy/litellm';
+const VLLM_LAGUNA = { name: 'alice-vllm-laguna', port: 8765 };
+const LLM_RESTART_HEALTH_TIMEOUT = 300_000; // cap while waking vllm-laguna back up (cold model load, not just a process start)
 
 function runCmd(cmd, args) {
   return new Promise((resolve) => {
@@ -60,27 +46,16 @@ function runCmd(cmd, args) {
   });
 }
 
-/**
- * `--rm` containers don't disappear the instant `docker stop` returns — the
- * actual removal happens asynchronously shortly after. Observed in practice:
- * an immediate `docker rm -f` + relaunch attempt right after `pauseLLMBackends()`
- * can race that cleanup and hit "Conflict: name already in use" even though
- * `docker rm -f` was called first. Retry the full remove+launch a few times
- * rather than assuming one attempt is enough.
- */
-async function relaunch(name, launchCmd, attempts = 5) {
-  for (let i = 0; i < attempts; i++) {
-    await runCmd('docker', ['rm', '-f', name]); // tolerate "no such container"
-    const { err, stderr } = await runCmd('bash', ['-c', launchCmd]);
-    if (!err) return;
-    const isNameConflict = /already in use|Conflict/i.test(stderr || '');
-    if (!isNameConflict || i === attempts - 1) {
-      console.error(`[comfyManager] failed to relaunch ${name}: ${err.message}\n${stderr}`);
-      return;
-    }
-    console.warn(`[comfyManager] ${name} relaunch hit a name conflict (attempt ${i + 1}/${attempts}), retrying...`);
-    await new Promise((r) => setTimeout(r, 3_000));
-  }
+function dockerStop(name) {
+  return runCmd('docker', ['stop', name]).then(({ err, stderr }) => {
+    if (err) console.warn(`[comfyManager] docker stop ${name} failed (may already be stopped): ${stderr || err.message}`);
+  });
+}
+
+function dockerStart(name) {
+  return runCmd('docker', ['start', name]).then(({ err, stderr }) => {
+    if (err) console.warn(`[comfyManager] docker start ${name} failed: ${stderr || err.message}`);
+  });
 }
 
 async function backendHealthy(port) {
@@ -109,29 +84,69 @@ function waitForBackendHealthy(port) {
 }
 
 /**
- * Stop all LLM backend containers to free memory for a ComfyUI job.
- * Tolerates individual failures (e.g. already stopped) — never throws.
- * Note: this REMOVES the containers (see module header) — resumeLLMBackends()
- * knows to relaunch them from scratch, not `docker start`.
+ * Point litellm-gateway's config at the given mode ('coding' -> vllm-laguna,
+ * 'comfy' -> small Ollama fallback) and restart it to pick up the change.
+ * Mirrors AliceBuilder's scripts/llm-mode-switch.sh, which is kept around as
+ * a manual fallback tool — both share the same flock lock file (.mode.lock)
+ * so a manual invocation can never interleave with this one, and both write
+ * .mode so `cat /home/jimmy/litellm/.mode` reflects reality regardless of
+ * which one made the last change.
  */
-export async function pauseLLMBackends() {
-  console.log('[comfyManager] pausing LLM backends to free memory for ComfyUI...');
-  await Promise.all(Object.keys(LLM_BACKENDS).map((name) => dockerStop(name)));
+async function swapLitellmConfig(mode) {
+  const cmd = `flock ${LITELLM_DIR}/.mode.lock -c "cp ${LITELLM_DIR}/config.${mode}.yaml ${LITELLM_DIR}/config.yaml && docker restart litellm-gateway && echo ${mode} > ${LITELLM_DIR}/.mode"`;
+  const { err, stderr } = await runCmd('bash', ['-c', cmd]);
+  if (err) console.error(`[comfyManager] failed to swap litellm-gateway to '${mode}' mode: ${stderr || err.message}`);
 }
 
 /**
- * Relaunch all LLM backend containers from scratch, one at a time (mirroring
- * the same one-at-a-time caution used for initial cold-boot bring-up, since
- * combined startup memory overshoot is more of a risk than steady-state
- * usage). Intended to be fire-and-forget from the caller — does not throw.
+ * Stop vllm-laguna and fail chat traffic over to a small Ollama model, to
+ * free memory for a ComfyUI job. Tolerates failures — never throws.
+ *
+ * Also force-unloads any Ollama model currently resident (`ollama stop`,
+ * harmless/no-op if nothing's loaded) — the comfy-mode chat fallback
+ * (qwen3:8b) and the vision route (alice-vision, ~15GB with an 8192-token
+ * context) both live on Ollama, and its default 5-minute keep-alive means a
+ * model used just before a video/image job can still be fully resident when
+ * ComfyUI launches. On this unified-memory box that's real GPU contention
+ * with ComfyUI's own dynamic-VRAM weight streaming — observed firsthand as
+ * a ~6x sampling slowdown (2026-08-09) after a VideoScriptAgent call loaded
+ * alice-vision immediately before a VideoAgent job. `ollama stop` without a
+ * model name isn't valid, so this queries `ollama ps` first.
+ */
+export async function pauseLLMBackends() {
+  console.log('[comfyManager] pausing vllm-laguna to free memory for ComfyUI...');
+  await dockerStop(VLLM_LAGUNA.name);
+  await unloadOllamaModels();
+  await swapLitellmConfig('comfy');
+}
+
+async function unloadOllamaModels() {
+  const { err, stdout } = await runCmd('ollama', ['ps']);
+  if (err) return; // Ollama not installed/reachable — nothing to unload
+  const loaded = stdout
+    .split('\n')
+    .slice(1) // header row
+    .map(line => line.trim().split(/\s+/)[0])
+    .filter(Boolean);
+  for (const model of loaded) {
+    console.log(`[comfyManager] unloading Ollama model ${model} to free GPU memory for ComfyUI...`);
+    await runCmd('ollama', ['stop', model]);
+  }
+}
+
+/**
+ * Restart vllm-laguna and restore litellm-gateway's routes to it once it's
+ * actually answering requests — not just once the container process has
+ * launched (loading the model takes 30-90s+; restarting the gateway before
+ * that finishes routes traffic into a backend that isn't serving yet).
+ * Intended to be fire-and-forget from the caller — does not throw.
  */
 export async function resumeLLMBackends() {
-  console.log('[comfyManager] relaunching LLM backends...');
-  for (const [name, { port, launchCmd }] of Object.entries(LLM_BACKENDS)) {
-    await relaunch(name, launchCmd);
-    await waitForBackendHealthy(port);
-  }
-  console.log('[comfyManager] LLM backends relaunched');
+  console.log('[comfyManager] resuming vllm-laguna...');
+  await dockerStart(VLLM_LAGUNA.name);
+  await waitForBackendHealthy(VLLM_LAGUNA.port);
+  await swapLitellmConfig('coding');
+  console.log('[comfyManager] vllm-laguna resumed, litellm-gateway routes restored');
 }
 
 // How long to wait after last job before killing ComfyUI (ms)
@@ -175,10 +190,18 @@ function launchProcess() {
   // --disable-mmap flag — both are reported to work on other models but to
   // break LTX-2.x specifically (all-black video, no error), which is exactly
   // what we run for I2V.
-  // --enable-manager turns on ComfyUI-Manager, which is built into core now
-  // rather than a separate custom_nodes install — without this flag there's
-  // no search/install UI for custom node packs at all.
-  const args = ['main.py', '--listen', listenAddr, '--reserve-vram', '8', '--disable-pinned-memory', '--enable-manager'];
+  // --enable-manager (REMOVED 2026-08-09): it turns on ComfyUI-Manager's
+  // search/install UI for custom node packs, but this is a headless,
+  // API-driven launch — nothing ever browses that UI, and every node this
+  // pipeline uses (MiniMaxH3*, UpscaleModelLoader, etc.) is core ComfyUI,
+  // not a Manager-installed package. It also crashed a real job: Manager's
+  // stderr-wrapping logger (comfyui_manager/prestartup_script.py) sits
+  // between tqdm's per-step progress writes and the console, and its pipe
+  // broke mid-sampling, raising BrokenPipeError and killing the whole node
+  // (SamplerCustomAdvanced) — not a memory or model issue, confirmed via the
+  // full traceback in ComfyUI's /history for that prompt_id. No upside here,
+  // real downside — leave this flag off.
+  const args = ['main.py', '--listen', listenAddr, '--reserve-vram', '8', '--disable-pinned-memory'];
   console.log(`[comfyManager] launching ComfyUI (${pythonBin} ${args.join(' ')})...`);
 
   // Use the venv python directly — avoids bash wrapper issues
@@ -192,6 +215,12 @@ function launchProcess() {
       // Stops PyTorch's caching allocator hoarding pages from the shared
       // unified-memory pool instead of returning them promptly.
       PYTORCH_NO_CUDA_MEMORY_CACHING: '1',
+      // ~/.triton/cache is root-owned from some earlier process (not ours to
+      // fix — no passwordless sudo here) — point Triton at a directory this
+      // user actually owns instead of failing to create new cache-key
+      // subdirs under root's tree. Hit by LTX-2.5's Gemma4 int8_convrot
+      // dequantization kernel on first use (2026-09-09).
+      TRITON_CACHE_DIR: `${venvDir}/.triton-cache`,
     },
   });
 

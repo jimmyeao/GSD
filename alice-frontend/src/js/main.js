@@ -19,7 +19,12 @@ let client = null;
 let codeView = null;
 let isStreaming = false;
 let _optimiseTimer = null;
-let attachedFiles = []; // [{ name, content }]
+let attachedFiles = []; // [{ name, content, isImage, isAudio, refLabel }]
+let videoMode = 't2v'; // VideoAgent only: 't2v'|'i2v'|'fl2v'|'ref2va', explicit (not inferred from attachment count)
+let videoModel = 'h3'; // VideoAgent only: 'h3'|'ltx' — LTX has no ref2va mode
+let imageModel = 'auto'; // ImageAgent only: 'auto'|'flux2'
+let imageAspect = 'square'; // ImageAgent+flux2 only: 'square'|'landscape'|'portrait'
+let upscale4k = false; // ImageAgent+flux2 only
 let currentConversationId = null;
 let conversations = [];
 let currentUser = null;
@@ -60,6 +65,17 @@ const optimiseStatus = document.getElementById('optimise-status');
 const attachBtn      = document.getElementById('attach-btn');
 const fileInput      = document.getElementById('file-input');
 const attachedFilesEl = document.getElementById('attached-files');
+const videoModeRow    = document.getElementById('video-mode-row');
+const videoModeSelect = document.getElementById('video-mode-select');
+const videoModelSelect = document.getElementById('video-model-select');
+const imageModelRow    = document.getElementById('image-model-row');
+const imageModelSelect = document.getElementById('image-model-select');
+const imageAspectSelect = document.getElementById('image-aspect-select');
+const imageUpscale4kToggle = document.getElementById('image-upscale4k-toggle');
+const musicOptionsRow  = document.getElementById('music-options-row');
+const musicDurationInput = document.getElementById('music-duration-input');
+const musicLyricsToggle = document.getElementById('music-lyrics-toggle');
+const musicLyricsInput = document.getElementById('music-lyrics-input');
 const authModal      = document.getElementById('auth-modal');
 const authError      = document.getElementById('auth-error');
 const btnMsLogin     = document.getElementById('btn-ms-login');
@@ -250,8 +266,76 @@ function selectAgent(agent) {
     exampleBanner.hidden = true;
   }
 
+  // Video mode/model selectors only make sense for VideoAgent; reset on
+  // switch so a stale mode from a previous VideoAgent session never carries over.
+  if (videoModeRow) videoModeRow.hidden = agent.id !== 'VideoAgent';
+  if (agent.id !== 'VideoAgent') { videoMode = 't2v'; videoModel = 'h3'; }
+  if (videoModeSelect) videoModeSelect.value = videoMode;
+  if (videoModelSelect) videoModelSelect.value = videoModel;
+  updateVideoModeOptions();
+
+  // Image model selector only makes sense for ImageAgent; reset on switch
+  // for the same reason as the video mode/model reset above.
+  if (imageModelRow) imageModelRow.hidden = agent.id !== 'ImageAgent';
+  if (agent.id !== 'ImageAgent') { imageModel = 'auto'; imageAspect = 'square'; upscale4k = false; }
+  if (imageModelSelect) imageModelSelect.value = imageModel;
+  if (imageAspectSelect) imageAspectSelect.value = imageAspect;
+  if (imageUpscale4kToggle) imageUpscale4kToggle.checked = upscale4k;
+  // Aspect/4K apply to every image model (Auto included), not just Flux.2 —
+  // no per-model hide/show needed, imageModelRow's own hidden flag above
+  // already covers non-ImageAgent agents.
+
+  // Music options only make sense for MusicAgent.
+  if (musicOptionsRow) musicOptionsRow.hidden = agent.id !== 'MusicAgent';
+
+  renderAttachedFileBadges();
+
   inputEl.focus();
 }
+
+// LTX has no character/style-reference mode, and no lip-synced dialogue
+// support either (both H3-exclusive) — disable those options rather than
+// remove them, and fall back to t2v if either was selected.
+function updateVideoModeOptions() {
+  if (!videoModeSelect) return;
+  const ref2vaOption = videoModeSelect.querySelector('option[value="ref2va"]');
+  const chainOption = videoModeSelect.querySelector('option[value="chain"]');
+  if (!ref2vaOption || !chainOption) return;
+  const isLTX = videoModel === 'ltx';
+  ref2vaOption.disabled = isLTX;
+  chainOption.disabled = isLTX;
+  if (isLTX && (videoMode === 'ref2va' || videoMode === 'chain')) {
+    videoMode = 't2v';
+    videoModeSelect.value = 't2v';
+  }
+}
+
+if (videoModeSelect) videoModeSelect.addEventListener('change', () => {
+  videoMode = videoModeSelect.value;
+  renderAttachedFileBadges();
+});
+
+if (musicLyricsToggle) musicLyricsToggle.addEventListener('change', () => {
+  if (musicLyricsInput) musicLyricsInput.hidden = !musicLyricsToggle.checked;
+});
+
+if (videoModelSelect) videoModelSelect.addEventListener('change', () => {
+  videoModel = videoModelSelect.value;
+  updateVideoModeOptions();
+  renderAttachedFileBadges();
+});
+
+if (imageModelSelect) imageModelSelect.addEventListener('change', () => {
+  imageModel = imageModelSelect.value;
+});
+
+if (imageAspectSelect) imageAspectSelect.addEventListener('change', () => {
+  imageAspect = imageAspectSelect.value;
+});
+
+if (imageUpscale4kToggle) imageUpscale4kToggle.addEventListener('change', () => {
+  upscale4k = imageUpscale4kToggle.checked;
+});
 
 // ------------------------------------------------------------------ Conversations sidebar
 async function loadConversations() {
@@ -730,18 +814,24 @@ function renderPendingApprovalsBanner() {
 
 // ------------------------------------------------------------------ Files
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp']);
+const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'm4a', 'ogg', 'flac', 'webm', 'aac', 'opus', 'weba']);
 
 function isImageFile(filename) {
   const ext = filename.split('.').pop().toLowerCase();
   return IMAGE_EXTENSIONS.has(ext);
 }
 
+function isAudioFile(filename) {
+  const ext = filename.split('.').pop().toLowerCase();
+  return AUDIO_EXTENSIONS.has(ext);
+}
+
 function readFile(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
-    if (isImageFile(file.name)) {
-      // Read images as base64 data URL
+    if (isImageFile(file.name) || isAudioFile(file.name)) {
+      // Read images/audio as base64 data URL
       reader.onload = e => resolve(e.target.result);
       reader.readAsDataURL(file);
     } else {
@@ -755,18 +845,61 @@ function readFile(file) {
 function renderAttachedFileBadges() {
   if (!attachedFilesEl) return;
   attachedFilesEl.innerHTML = '';
+
+  const isVideoAgent = selectedAgent.id === 'VideoAgent';
+  const isRef2VA = isVideoAgent && videoMode === 'ref2va';
+  const isChainMode = isVideoAgent && videoMode === 'chain';
+  const isFL2VMode = isVideoAgent && !isRef2VA && !isChainMode; // t2v/i2v/fl2v: first/last-frame inferred from image order
+  let imageIndex = -1;
+
   attachedFiles.forEach((f, i) => {
     const badge = document.createElement('span');
     badge.className = 'file-badge';
-    badge.innerHTML = `📎 ${f.name} <span class="file-badge-remove" data-index="${i}" title="Remove">×</span>`;
+    const icon = f.isAudio ? '🔊' : '📎';
+    badge.appendChild(document.createTextNode(`${icon} ${f.name} `));
+
+    if (isFL2VMode && f.isImage) {
+      imageIndex += 1;
+      if (imageIndex === 0 || imageIndex === 1) {
+        const roleEl = document.createElement('span');
+        roleEl.className = 'file-badge-role';
+        roleEl.textContent = imageIndex === 0 ? 'First frame' : 'Last frame';
+        badge.appendChild(roleEl);
+        badge.appendChild(document.createTextNode(' '));
+      }
+    }
+
+    if (isRef2VA && (f.isImage || f.isAudio)) {
+      // Reference mode: no positional meaning — let the user optionally name
+      // what each reference is ("Alex", "brand style"). Alice composes the
+      // <Picture N>/<Audio N> tags from these automatically server-side, so
+      // the user never has to learn MiniMax H3's reference syntax.
+      const labelEl = document.createElement('input');
+      labelEl.type = 'text';
+      labelEl.className = 'file-badge-label';
+      labelEl.placeholder = 'label (optional)';
+      labelEl.value = f.refLabel || '';
+      labelEl.dataset.index = String(i);
+      labelEl.addEventListener('input', () => { f.refLabel = labelEl.value; });
+      badge.appendChild(labelEl);
+      badge.appendChild(document.createTextNode(' '));
+    }
+
+    const removeEl = document.createElement('span');
+    removeEl.className = 'file-badge-remove';
+    removeEl.dataset.index = String(i);
+    removeEl.title = 'Remove';
+    removeEl.textContent = '×';
+    badge.appendChild(removeEl);
+
     attachedFilesEl.appendChild(badge);
   });
   attachedFilesEl.hidden = attachedFiles.length === 0;
 }
 
 function buildMessageWithFiles(text, files) {
-  // Only include non-image files inline in the message text
-  const textFiles = files.filter(f => !f.isImage);
+  // Only include plain text files inline in the message text (not binary image/audio)
+  const textFiles = files.filter(f => !f.isImage && !f.isAudio);
   if (!textFiles.length) return text;
   const sections = textFiles.map(f => {
     const ext = f.name.split('.').pop() || '';
@@ -783,7 +916,7 @@ if (fileInput) fileInput.addEventListener('change', async () => {
     try {
       const content = await readFile(file);
       if (!attachedFiles.find(f => f.name === file.name)) {
-        attachedFiles.push({ name: file.name, content, isImage: isImageFile(file.name) });
+        attachedFiles.push({ name: file.name, content, isImage: isImageFile(file.name), isAudio: isAudioFile(file.name) });
       }
     } catch (err) {
       chat.addErrorMessage(err.message);
@@ -821,9 +954,39 @@ function handleSend() {
   const files = [...attachedFiles];
   const content = buildMessageWithFiles(text, files);
 
-  // Extract first attached image for agents that support it (VideoAgent, ImageAgent)
-  const imageFile = files.find(f => f.isImage);
-  const imageData = imageFile ? { name: imageFile.name, dataUrl: imageFile.content } : null;
+  const isRef2VA = selectedAgent.id === 'VideoAgent' && videoMode === 'ref2va';
+  const isChainMode = selectedAgent.id === 'VideoAgent' && videoMode === 'chain';
+
+  let imageData = null, lastFrameData = null, references = null, chainImagesData = null;
+  if (isRef2VA) {
+    references = files
+      .filter(f => f.isImage || f.isAudio)
+      .map(f => ({ name: f.name, dataUrl: f.content, kind: f.isAudio ? 'audio' : 'image', label: f.refLabel || undefined }));
+    const imageCount = references.filter(r => r.kind === 'image').length;
+    const audioCount = references.filter(r => r.kind === 'audio').length;
+    if (imageCount > 9 || audioCount > 3) {
+      chat.addErrorMessage(`Reference mode supports at most 9 images and 3 audio clips (attached ${imageCount} image(s), ${audioCount} audio clip(s)).`);
+      return;
+    }
+  } else if (isChainMode) {
+    // All attached images go through, named — the script's own "Image:
+    // <filename>" lines decide which chunk uses which, not attachment order.
+    const imageFiles = files.filter(f => f.isImage);
+    chainImagesData = imageFiles.length
+      ? imageFiles.map(f => ({ name: f.name, dataUrl: f.content }))
+      : null;
+  } else {
+    // VideoAgent (t2v/i2v/fl2v) / ImageAgent: 1 image -> image-to-video, 2 -> first/last-frame.
+    const imageFiles = files.filter(f => f.isImage);
+    imageData = imageFiles[0] ? { name: imageFiles[0].name, dataUrl: imageFiles[0].content } : null;
+    lastFrameData = imageFiles[1] ? { name: imageFiles[1].name, dataUrl: imageFiles[1].content } : null;
+  }
+
+  let lyrics = null, musicSeconds = null;
+  if (selectedAgent.id === 'MusicAgent') {
+    lyrics = (musicLyricsToggle?.checked && musicLyricsInput?.value.trim()) || null;
+    musicSeconds = Number(musicDurationInput?.value) || 30;
+  }
 
   chat.addUserMessage(text, files);
   chat.startAssistantStream(selectedAgent.label);
@@ -834,7 +997,7 @@ function handleSend() {
   autoResizeTextarea();
 
   try {
-    client.sendMessage(selectedAgent.id, content, chat.history.slice(0, -2), currentConversationId, imageData);
+    client.sendMessage(selectedAgent.id, content, chat.history.slice(0, -2), currentConversationId, imageData, lastFrameData, videoMode, references, videoModel, lyrics, musicSeconds, chainImagesData, imageModel, imageAspect, upscale4k);
   } catch (err) {
     chat.finaliseStream();
     chat.addErrorMessage(err.message);

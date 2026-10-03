@@ -90,6 +90,21 @@ Some Ollama tool-calling variants (particularly Qwen3 32B) emit a single tool ca
 
 ---
 
+## ComfyUI / vLLM memory coordination
+
+### Symptom: box hard-crashes (needs a physical reboot) during image/video generation
+`comfyManager.js`'s `pauseLLMBackends()`/`resumeLLMBackends()` used to manage two spark-vllm-docker containers directly (`alice-vllm-mail` on :8003, `alice-vllm-coder` on :8002). Those were later consolidated behind `litellm-gateway` onto a single shared backend, `vllm-laguna` — run by a *different* repo (AliceBuilder, `/home/jimmy/AliceBuilder/docker-compose.yml`) — but this file was never updated to know about it. A real generation job paused the (by then nonexistent) old backends while `vllm-laguna` stayed fully resident the whole time. Combined memory pressure (ComfyUI's ~53GB + everything else already running) exhausted this unified-memory box's 121GiB with no swap configured, and it hard-crashed (2026-08-01).
+
+Compounding it: AliceBuilder *also* had its own independent watcher (`comfyui-watcher.sh`, a systemd service polling ComfyUI's port) that had no idea this file existed either, and never fired for the real job.
+
+**Fix:** `pauseLLMBackends()`/`resumeLLMBackends()` now directly stop/start `alice-vllm-laguna` (plain `docker stop`/`docker start` — it's docker-compose managed with `restart: unless-stopped`, not `--rm`, so stop doesn't remove it) and swap `/home/jimmy/litellm/config.yaml` between `config.coding.yaml` (→ vllm-laguna) and `config.comfy.yaml` (→ a small Ollama model), restarting `litellm-gateway` after each swap. AliceBuilder's redundant `comfyui-watcher.sh`/systemd service has been deleted. **This file is now the single, authoritative place that pauses/resumes LLM backends for ComfyUI jobs** — if `vllm-laguna`'s name/port ever changes, or a new backend gets added, update `VLLM_LAGUNA` here (and mirror the change in `/home/jimmy/AliceBuilder/ARCHITECTURE.md`). Do not let a second, uncoordinated pause mechanism reappear.
+
+**Also fixed:** `resumeLLMBackends()` used to declare success as soon as `docker start` returned, before the model had actually finished loading (30-90s+ for a cold load). Any request landing in that gap got `Server disconnected` or an empty/truncated response. It now polls `http://127.0.0.1:8765/v1/models` (up to 300s) before restarting the gateway.
+
+**Also fixed:** the config swap now runs under `flock` on `/home/jimmy/litellm/.mode.lock` — AliceBuilder's manual fallback script (`scripts/llm-mode-switch.sh`) shares the same lock file, so a manual invocation there can never interleave with this module's own swap and corrupt `config.yaml`/`.mode`.
+
+---
+
 ## CoderAgent file-write path
 
 ### Symptom: empty files appear where the agent "wrote" code
@@ -131,3 +146,5 @@ Whitespace and indentation must be **character-for-character exact**. The model 
 | Ollama client (think/noThink, num_ctx) | `alice-backend/src/agents/llmClient.js` |
 | MailAgent batch dispatcher | `alice-backend/src/agents/mailAgent.js` (`plan_mutations`) |
 | NPM reverse-proxy template | reverse-proxy UI — not in repo |
+| ComfyUI/vLLM memory coordination | `alice-backend/src/comfyManager.js` (`pauseLLMBackends`/`resumeLLMBackends`); shared litellm-gateway config at `/home/jimmy/litellm` (not in this repo, not in AliceBuilder either) |
+| Agent sidebar labels (which model an agent uses) | `alice-frontend/src/js/agents.js` (`AGENTS`, `MODEL_BADGE_CLASS`) |

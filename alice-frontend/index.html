@@ -279,11 +279,51 @@
         <span id="example-text"></span>
       </div>
 
+      <div id="video-mode-row" hidden>
+        <label for="video-model-select">Video model</label>
+        <select id="video-model-select">
+          <option value="h3">MiniMax H3 (slower, higher fidelity)</option>
+          <option value="ltx">LTX-2.5 (faster)</option>
+        </select>
+        <label for="video-mode-select">Video mode</label>
+        <select id="video-mode-select">
+          <option value="t2v">Text to video</option>
+          <option value="i2v">Animate an image</option>
+          <option value="fl2v">Connect a start and end frame</option>
+          <option value="ref2va">Use character/style references</option>
+          <option value="chain">Chained story (multi-clip, H3 only)</option>
+        </select>
+      </div>
+      <div id="image-model-row" hidden>
+        <label for="image-model-select">Image model</label>
+        <select id="image-model-select">
+          <option value="auto">Auto (ERNIE Turbo / SD)</option>
+          <option value="flux2">Flux.2 Dev (slower, higher fidelity)</option>
+        </select>
+        <span id="image-flux2-options">
+          <label for="image-aspect-select">Aspect</label>
+          <select id="image-aspect-select">
+            <option value="square">Square</option>
+            <option value="landscape">Landscape</option>
+            <option value="portrait">Portrait</option>
+          </select>
+          <label for="image-upscale4k-toggle" title="2x RealESRGAN upscale after generation">
+            <input id="image-upscale4k-toggle" type="checkbox" /> 4K upscale
+          </label>
+        </span>
+      </div>
+      <div id="music-options-row" hidden>
+        <label for="music-duration-input">Duration (s)</label>
+        <input id="music-duration-input" type="number" min="5" max="240" step="1" value="30" />
+        <label for="music-lyrics-input">Lyrics (optional — empty = instrumental)</label>
+        <input id="music-lyrics-toggle" type="checkbox" title="Add lyrics" />
+        <textarea id="music-lyrics-input" rows="3" placeholder="[Verse 1]..." hidden></textarea>
+      </div>
       <div id="attached-files" hidden></div>
       <div id="input-row">
         <button id="attach-btn" title="Attach a file">📎</button>
         <input id="file-input" type="file" multiple hidden
-               accept=".txt,.md,.js,.ts,.py,.json,.csv,.html,.css,.sh,.ps1,.psm1,.yaml,.yml,.xml,.sql,.go,.rs,.java,.c,.cpp,.h,.rb,.php,.swift,.kt,.r,.lua,.toml,.ini,.env,.log,.png,.jpg,.jpeg,.gif,.webp,.bmp" />
+               accept=".txt,.md,.js,.ts,.py,.json,.csv,.html,.css,.sh,.ps1,.psm1,.yaml,.yml,.xml,.sql,.go,.rs,.java,.c,.cpp,.h,.rb,.php,.swift,.kt,.r,.lua,.toml,.ini,.env,.log,.png,.jpg,.jpeg,.gif,.webp,.bmp,.mp3,.wav,.m4a,.ogg,.flac" />
         <textarea
           id="prompt-input"
           rows="1"
