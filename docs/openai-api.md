@@ -33,7 +33,8 @@ to `https://<your-alice-host>/api/v1`.
     { "id": "alice-mail", "object": "model", "owned_by": "alice" },
     { "id": "alice-vision", "object": "model", "owned_by": "alice" },
     { "id": "alice-image-auto", "object": "model", "owned_by": "alice" },
-    { "id": "alice-image-flux2", "object": "model", "owned_by": "alice" }
+    { "id": "alice-image-flux2", "object": "model", "owned_by": "alice" },
+    { "id": "alice-image-krea2", "object": "model", "owned_by": "alice" }
   ]
 }
 ```
@@ -82,7 +83,7 @@ real OpenAI contract, instead of `/agent/image`'s async job-polling.
 | field | type | default | notes |
 |---|---|---|---|
 | `prompt` | string | required | |
-| `model` | `"alice-image-auto"` \| `"alice-image-flux2"` | `"alice-image-auto"` | `flux2` = Flux.2 Dev (slower, higher quality) |
+| `model` | `"alice-image-auto"` \| `"alice-image-flux2"` \| `"alice-image-krea2"` | `"alice-image-auto"` | `flux2` = Flux.2 Dev (slower, higher quality), `krea2` = Krea 2 Turbo (8-step, aesthetic-first) |
 | `size` | `"WxH"` string | `1024x1024` (i.e. ComfyUI's default) if omitted | any width/height ComfyUI accepts |
 | `n` | number | `1` | capped at 4; images are generated **sequentially**, not in parallel |
 | `response_format` | `"b64_json"` | `"b64_json"` | **only `b64_json` is supported** — Alice doesn't persist generated media (see [agent-api.md](agent-api.md)), so there's no stable URL to hand back like real OpenAI's default `"url"` format |
@@ -124,7 +125,8 @@ endpoint in a tight loop expecting concurrent chat availability.
 
 - `/v1/completions` (legacy non-chat completions)
 - `/v1/embeddings`
-- `/v1/audio/*` (Alice has its own `/tts` route, not OpenAI-shaped)
+- `/v1/audio/*` (Alice has its own `/tts` route, not OpenAI-shaped; for
+  music and sound effects use [`/agent/music` / `/agent/sfx`](agent-api.md))
 - Video generation has no OpenAI standard endpoint to mirror — use
   [`/agent/video`](agent-api.md) directly.
 

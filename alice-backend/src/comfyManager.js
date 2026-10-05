@@ -159,6 +159,22 @@ let idleTimer = null;
 let isStarting = false;
 let startPromise = null;
 
+// Concurrency guard for freeComfyMemory (2026-10-05). It used to shut
+// ComfyUI down unconditionally, so ANY job finishing — or erroring, e.g. a
+// short SFX job timing out while still queued behind a long one — killed
+// every other job still running or queued in ComfyUI. Real incident: an
+// SfxAgent timeout killed a 45-min H3 Ref2VA job mid-VAE-decode. Shutdown
+// now waits until ComfyUI's own queue is empty AND no caller is between
+// ensureComfyRunning() and queueing its prompt.
+let activeJobs = 0;          // ensureComfyRunning() calls not yet matched by freeComfyMemory()
+let lastEnsureAt = 0;
+let deferredFreeTimer = null;
+const FREE_RECHECK_MS = 15_000;
+// Not every caller pairs ensure/free on its error path — past this, an
+// unmatched activeJobs count with an empty queue is treated as a leak
+// rather than holding ComfyUI (and the paused LLM) up forever.
+const ACTIVE_JOB_GRACE_MS = 60_000;
+
 /**
  * Check if ComfyUI is reachable.
  */
@@ -282,6 +298,10 @@ export async function ensureComfyRunning() {
   // Pause idle timer while a job is about to run
   clearTimeout(idleTimer);
   idleTimer = null;
+  clearTimeout(deferredFreeTimer);
+  deferredFreeTimer = null;
+  activeJobs += 1;
+  lastEnsureAt = Date.now();
 
   // Already running?
   if (await isRunning()) {
@@ -317,6 +337,34 @@ export async function ensureComfyRunning() {
  * ComfyUI will be relaunched on demand for the next job.
  */
 export async function freeComfyMemory() {
+  activeJobs = Math.max(0, activeJobs - 1);
+  clearTimeout(deferredFreeTimer);
+  deferredFreeTimer = null;
+  await tryShutdownWhenIdle();
+}
+
+/** True if ComfyUI still has a running or pending prompt. */
+async function comfyQueueBusy() {
+  try {
+    const res = await fetch(`${config.models.comfyui.endpoint}/queue`, { signal: AbortSignal.timeout(3_000) });
+    if (!res.ok) return false;
+    const q = await res.json();
+    return (q.queue_running?.length ?? 0) + (q.queue_pending?.length ?? 0) > 0;
+  } catch {
+    return false; // unreachable = nothing to protect
+  }
+}
+
+async function tryShutdownWhenIdle() {
+  if (!comfyProcess) return;
+  const busy = await comfyQueueBusy();
+  const callerInFlight = activeJobs > 0 && Date.now() - lastEnsureAt < ACTIVE_JOB_GRACE_MS;
+  if (busy || callerInFlight) {
+    console.log(`[comfyManager] not shutting down — ${busy ? 'ComfyUI queue busy' : `${activeJobs} job(s) starting`}; rechecking in ${FREE_RECHECK_MS / 1000}s`);
+    deferredFreeTimer = setTimeout(() => { deferredFreeTimer = null; tryShutdownWhenIdle(); }, FREE_RECHECK_MS);
+    return;
+  }
+  activeJobs = 0;
   shutdownComfy();
   console.log('[comfyManager] ComfyUI shut down after job');
   // Fire-and-forget: the image/video result shouldn't wait on the LLM

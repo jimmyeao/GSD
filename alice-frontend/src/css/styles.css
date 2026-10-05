@@ -623,7 +623,9 @@ body {
   padding: 3px 6px;
 }
 
-#music-options-row {
+#music-options-row,
+#sfx-options-row,
+#explainer-options-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
@@ -632,8 +634,12 @@ body {
   font-size: 12px;
   color: var(--text-sec);
 }
-#music-options-row[hidden] { display: none; }
-#music-options-row input[type="number"] {
+#music-options-row[hidden],
+#sfx-options-row[hidden],
+#explainer-options-row[hidden] { display: none; }
+#music-options-row input[type="number"],
+#sfx-options-row input[type="number"],
+#explainer-options-row input[type="number"] {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 4px;

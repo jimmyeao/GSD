@@ -184,7 +184,7 @@ export function parseScriptChunks(script) {
  * @param {string} filename - Target filename
  * @returns {Promise<string>} The filename as stored by ComfyUI
  */
-async function uploadMediaToComfy(endpoint, dataUrl, filename) {
+export async function uploadMediaToComfy(endpoint, dataUrl, filename) {
   // Strip the data URL prefix to get raw base64 (any media type)
   const base64 = dataUrl.replace(/^data:[\w/-]+;base64,/, '');
   const buffer = Buffer.from(base64, 'base64');
@@ -682,7 +682,7 @@ function buildLTXFirstLastFrameWorkflow(prompt, { firstFrameName, lastFrameName,
  * When found, immediately downloads and caches the video locally
  * (so ComfyUI can be safely killed after this returns).
  */
-async function pollForVideo(endpoint, clientId, promptId, timeoutMs, onProgress, onPromptExpanded) {
+export async function pollForVideo(endpoint, clientId, promptId, timeoutMs, onProgress, onPromptExpanded) {
   const { writeFileSync, mkdirSync } = await import('node:fs');
   const { join, dirname } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
@@ -795,7 +795,7 @@ async function pollForVideo(endpoint, clientId, promptId, timeoutMs, onProgress,
   }
 }
 
-async function queueWorkflow(endpoint, workflow, clientId) {
+export async function queueWorkflow(endpoint, workflow, clientId) {
   const queueRes = await fetch(`${endpoint}/prompt`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

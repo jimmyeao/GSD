@@ -123,7 +123,7 @@ export class SocketClient {
     }
   }
 
-  sendMessage(agent, content, history = [], conversationId = null, imageData = null, lastFrameData = null, videoMode = null, references = null, videoModel = null, lyrics = null, musicSeconds = null, chainImagesData = null, imageModel = null, imageAspect = null, upscale4k = false) {
+  sendMessage(agent, content, history = [], conversationId = null, imageData = null, lastFrameData = null, videoMode = null, references = null, videoModel = null, lyrics = null, musicSeconds = null, chainImagesData = null, imageModel = null, imageAspect = null, upscale4k = false, sfxSeconds = null, explainerOptions = null) {
     if (!this.socket || !this.connected) {
       throw new Error('Not connected to backend.');
     }
@@ -138,11 +138,15 @@ export class SocketClient {
     // MusicAgent: optional lyrics (empty = instrumental) + target duration.
     if (lyrics) payload.lyrics = lyrics;
     if (musicSeconds) payload.musicSeconds = musicSeconds;
+    // SfxAgent: target duration.
+    if (sfxSeconds) payload.sfxSeconds = sfxSeconds;
+    // ExplainerAgent: format / length / presenter scenes / creative mode.
+    if (explainerOptions) payload.explainerOptions = explainerOptions;
     // VideoAgent chain mode: all attached reference images, matched by name
     // against each script chunk's own "Image: <filename>" line.
     if (chainImagesData) payload.chainImagesData = chainImagesData;
     // ImageAgent explicit model selector — 'auto' (default) omitted since
-    // that's the backend's own default too, only 'flux2' needs to travel.
+    // that's the backend's own default too, only 'flux2'/'krea2' need to travel.
     if (imageModel && imageModel !== 'auto') payload.imageModel = imageModel;
     if (imageAspect && imageAspect !== 'square') payload.imageAspect = imageAspect;
     if (upscale4k) payload.upscale4k = true;

@@ -1,5 +1,7 @@
 /**
- * Music generation client for ComfyUI, via ACE-Step 1.5 (turbo).
+ * Music generation client for ComfyUI, via ACE-Step 1.5 (turbo). Also hosts
+ * sound-effect generation via Stable Audio 3 Medium (generateSfx below) —
+ * same queue/poll/cache plumbing, different model graph.
  * Native ComfyUI core support (comfy_extras/nodes_ace.py) — no custom node
  * install needed. Single-pass, 8-step graph, no crop/guide bookkeeping like
  * the video pipelines. Verified node-for-node against the official bundled
@@ -53,6 +55,36 @@ function buildAceStepWorkflow(tags, lyrics, { seconds = 30, bpm = 120, seed, key
     // pattern as SaveVideo's codec param: a flat string still works for the
     // top-level combo value, confirmed against source).
     '10': { class_type: 'SaveAudioAdvanced', inputs: { audio: ['9', 0], filename_prefix: 'alice_music', format: 'flac' } },
+  };
+}
+
+/**
+ * Build a Stable Audio 3 Medium API workflow — mirrors the core of ComfyUI's
+ * official "Stable Audio 3.0 Medium" template subgraph: checkpoint (model +
+ * VAE) + T5Gemma text encoder (type stable_audio), EmptyLatentAudio sized by
+ * seconds, KSampler steps=8 cfg=1 lcm/simple, empty-string negative. The
+ * template's optional Qwen reprompt (TextGenerate) step is left out — the
+ * caller's prompt goes straight to the encoder.
+ * @param {string} prompt  Sound description (e.g. "glass bottle shattering on concrete, close-up").
+ * @param {number} seconds Clip length.
+ */
+function buildStableAudio3Workflow(prompt, { seconds = 5, seed } = {}) {
+  const noiseSeed = seed ?? Math.floor(Math.random() * 2 ** 32);
+  return {
+    '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'stable_audio_3_medium.safetensors' } },
+    '2': { class_type: 'CLIPLoader', inputs: { clip_name: 't5gemma_b_b_ul2.safetensors', type: 'stable_audio', device: 'default' } },
+    '3': { class_type: 'CLIPTextEncode', inputs: { text: prompt, clip: ['2', 0] } },
+    '4': { class_type: 'CLIPTextEncode', inputs: { text: '', clip: ['2', 0] } },
+    '5': { class_type: 'EmptyLatentAudio', inputs: { seconds, batch_size: 1 } },
+    '6': {
+      class_type: 'KSampler',
+      inputs: {
+        model: ['1', 0], positive: ['3', 0], negative: ['4', 0], latent_image: ['5', 0],
+        seed: noiseSeed, steps: 8, cfg: 1, sampler_name: 'lcm', scheduler: 'simple', denoise: 1,
+      },
+    },
+    '7': { class_type: 'VAEDecodeAudio', inputs: { samples: ['6', 0], vae: ['1', 2] } },
+    '8': { class_type: 'SaveAudioAdvanced', inputs: { audio: ['7', 0], filename_prefix: 'alice_sfx', format: 'flac' } },
   };
 }
 
@@ -140,7 +172,7 @@ async function pollForAudio(endpoint, clientId, promptId, timeoutMs, onProgress)
     }
   }
 
-  throw new Error('Music generation timed out');
+  throw new Error('Audio generation timed out');
   } finally {
     stopMonitor();
   }
@@ -159,5 +191,20 @@ export async function generateMusic(endpoint, tags, lyrics, seconds = 30, timeou
   const workflow = buildAceStepWorkflow(tags, lyrics, { seconds });
   const promptId = await queueWorkflow(endpoint, workflow, clientId);
   console.log(`[musicClient] music queued: ${promptId} (${seconds}s${lyrics ? ', with lyrics' : ', instrumental'})`);
+  return pollForAudio(endpoint, clientId, promptId, timeoutMs, onProgress);
+}
+
+/**
+ * Generate a sound effect / ambience clip with Stable Audio 3 Medium.
+ * @param {string} endpoint  - ComfyUI URL
+ * @param {string} prompt    - Sound description
+ * @param {number} seconds   - Target duration
+ * @param {number} timeoutMs
+ */
+export async function generateSfx(endpoint, prompt, seconds = 5, timeoutMs = 300_000, onProgress) {
+  const clientId = `alice-sfx-${Date.now()}`;
+  const workflow = buildStableAudio3Workflow(prompt, { seconds });
+  const promptId = await queueWorkflow(endpoint, workflow, clientId);
+  console.log(`[musicClient] sfx queued: ${promptId} (${seconds}s)`);
   return pollForAudio(endpoint, clientId, promptId, timeoutMs, onProgress);
 }

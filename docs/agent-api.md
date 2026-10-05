@@ -71,7 +71,7 @@ bytes yourself once you have them.
 |---|---|---|---|
 | `prompt` | string | required | |
 | `negativePrompt` | string | `""` | |
-| `imageModel` | `"auto"` \| `"flux2"` | `"auto"` | `flux2` = Flux.2 Dev |
+| `imageModel` | `"auto"` \| `"flux2"` \| `"krea2"` | `"auto"` | `flux2` = Flux.2 Dev, `krea2` = Krea 2 Turbo (~1MP native: 1024², 1368×768, 768×1368) |
 | `imageAspect` | `"square"` \| `"landscape"` \| `"portrait"` | `"square"` | ignored if `width`+`height` given |
 | `upscale4k` | boolean | `false` | RealESRGAN upscale pass |
 | `width`, `height` | number | — | must be given **together**; overrides `imageAspect` |
@@ -128,7 +128,7 @@ shape generation → PBR texture painting → GLB export. Source:
 |---|---|---|---|
 | `prompt` | string | — | generates the reference photo; mutually exclusive with `image` |
 | `image` | `{name, dataUrl}` | — | supply your own reference photo instead of generating one (same shape as video's `firstFrame`); mutually exclusive with `prompt` |
-| `imageModel` | `"auto"` \| `"flux2"` | `"auto"` | only used with `prompt` |
+| `imageModel` | `"auto"` \| `"flux2"` \| `"krea2"` | `"auto"` | only used with `prompt` |
 | `imageAspect` | `"square"` \| `"landscape"` \| `"portrait"` | `"square"` | only used with `prompt`; ignored if `width`+`height` given |
 | `upscale4k` | boolean | `false` | only used with `prompt` |
 | `width`, `height` | number | — | only used with `prompt`; must be given together |
@@ -322,6 +322,206 @@ sizes, missing frame for `i2v`/`fl2v`/`fl2v`-in-chain). `502` for a
 generation failure (ComfyUI/model error — message in `error`). `503` if
 ComfyUI/the GPU host was offline when the job ran. `404` for an unknown or
 expired `job_id`.
+
+---
+
+## Music — `POST /agent/music` (2026-10-05)
+
+Generates a music track with **ACE-Step 1.5 XL Turbo** — instrumental, or
+with sung vocals if you pass `lyrics`. Same model/graph the in-app
+MusicAgent uses. Source: `src/agents/musicClient.js` (`generateMusic`).
+
+```json
+{
+  "prompt": "ambient, calm piano, soft pads, 80 BPM",
+  "lyrics": "",
+  "durationSeconds": 30
+}
+```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `prompt` | string | **required** | style/genre/instrument tags |
+| `lyrics` | string | `""` | empty = instrumental |
+| `durationSeconds` | number | `30` | 1–240 |
+
+## Sound effects — `POST /agent/sfx` (2026-10-05)
+
+Generates a sound effect, ambience bed, or one-shot with **Stable Audio 3
+Medium** (stereo, 44.1kHz). Source: `src/agents/musicClient.js`
+(`generateSfx`). Describe the source, material, space, and how it evolves
+over time for best results — e.g. *"heavy wooden door creaking open slowly
+in a stone castle hallway, reverberant"*.
+
+```json
+{ "prompt": "glass bottle shattering on concrete, close-up, dry", "durationSeconds": 3 }
+```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `prompt` | string | **required** | sound description |
+| `durationSeconds` | number | `5` | 1–120 — impacts 1–3s, actions 3–6s, ambience 6–15s+ |
+
+### Response (both)
+
+`POST` → `202 { "job_id": "...", "status_url": "/agent/music/<id>" }` (or
+`/agent/sfx/<id>`). Poll the status URL: `{"status":"processing"}` until
+done, then `200`, `Content-Type: audio/flac`, body = the raw FLAC bytes.
+
+```bash
+id=$(curl -s -X POST $HOST/agent/sfx \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"prompt": "thunder rumbling in the distance, heavy rain on a tin roof", "durationSeconds": 10}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])')
+
+while curl -s $HOST/agent/sfx/$id -H "Authorization: Bearer $KEY" | grep -q '"processing"'; do sleep 5; done
+curl -s $HOST/agent/sfx/$id -H "Authorization: Bearer $KEY" -o sfx.flac
+```
+
+### Errors
+
+`400` for a missing `prompt`, non-string `lyrics`, or out-of-range
+`durationSeconds`. `502` for a generation failure. `503` if ComfyUI/the GPU
+host was offline. `404` for an unknown/expired `job_id`.
+
+---
+
+## Talking head — `POST /agent/talking-head` (2026-10-05)
+
+Generates one presenter clip — a person speaking to camera — with
+**LTX-2.3 + ID-LoRA**. Source: `src/agents/talkingHeadClient.js` (mirrors
+ComfyUI's official "LTX-2.3: ID LoRA" template).
+
+Important: this is **not** lip-sync to a supplied audio track. LTX generates
+the speech itself (jointly with the video, so the lips match by
+construction), saying the `speech` text. `voiceRef` only clones the
+*voice* — a ~5s clean speech sample works best. The portrait is pinned as
+the literal first frame, so the face stays consistent; reuse the same
+portrait + voice sample + `seed` across clips for a consistent presenter.
+
+```json
+{
+  "portrait": { "name": "presenter.png", "dataUrl": "data:image/png;base64,..." },
+  "voiceRef": { "name": "voice.wav", "dataUrl": "data:audio/wav;base64,..." },
+  "visual": "A static medium close-up of a woman with auburn hair in a navy blazer, in a softly lit studio. She looks at the camera and speaks warmly, mouth moving naturally. The camera stays still.",
+  "speech": "Hi, I'm Alice. Let me show you how it works.",
+  "sounds": "Clear, warm British female voice, close to the microphone. Quiet room tone.",
+  "durationSeconds": 8
+}
+```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `portrait` | `{name, dataUrl}` | **required** | presenter image, pinned as the first frame |
+| `voiceRef` | `{name, dataUrl}` | **required** | ~5s speech sample whose voice is cloned |
+| `visual` | string | **required** | shot, appearance, setting, action |
+| `speech` | string | **required** | exact words — keep to ~25 words / ~10s (LTX drifts past that) |
+| `sounds` | string | `""` | vocal style + ambience |
+| `durationSeconds` | number | `8` | 2–15 |
+| `width` / `height` | number | `1280` / `720` | LTX rounds to multiples of 32 (720 → 704) |
+| `seed` | integer | random | reuse for consistency across clips |
+
+`POST` → `202 { job_id, status_url: "/agent/talking-head/<id>" }`; poll until
+`200`, `Content-Type: video/mp4` (25 fps, with audio). Speed on this box:
+~6 min per ~9s clip, plus a one-off ~8 min model load if LTX-2.3 isn't
+already loaded.
+
+### Errors
+
+`400` for missing/invalid `portrait`/`voiceRef`/`visual`/`speech` or
+out-of-range `durationSeconds`. `502` generation failure, `503` ComfyUI
+offline, `404` unknown/expired `job_id`.
+
+---
+
+## Explainer / promo video — `POST /agent/explainer` (2026-10-05)
+
+Turns a brief into a finished explainer or product-promo MP4, end to end on
+local models — the same pipeline as the web UI's 🎞️ Explainer agent.
+Source: `src/agents/explainer/`.
+
+| Step | What runs |
+|---|---|
+| plan | Laguna (local LLM) → scenes: spoken lines, headlines, a layout per scene, background-image ideas, palette/font, music prompt. Validated + repaired in code (scene/presenter caps, ~10s line limit, stats must use numbers that appear in the brief). |
+| voice | Kokoro reads every line — real durations drive the whole timeline |
+| media | one ComfyUI session: Krea 2 presenter portrait + backgrounds, LTX-2.3 ID-LoRA presenter clips, ACE-Step music bed, Stable Audio 3 transition sfx |
+| captions | whisper word timings from the audio that actually plays |
+| compose | HyperFrames composition: timeline, media, captions and audio mix built in code; each scene's graphics from a layout library (`bullets`, `stat`, `steps`, `compare`, `statement`, `title`, `cta`) |
+| render | `hyperframes check` + `hyperframes render` → 1920×1080 MP4 |
+
+Every media step is best-effort: a failed presenter clip turns that scene
+into a narrated one (its Kokoro read already exists), a failed background
+falls back to a gradient, missing music/sfx are skipped — reported in
+`warnings`.
+
+```json
+{
+  "brief": "Explainer for PulseBoard, an analytics dashboard for small e-commerce teams. Connects to Shopify and Stripe in two clicks, replaces weekly spreadsheet reporting, sends a Monday summary to Slack. Beta teams cut reporting time by 87 percent. Free 14-day trial at pulseboard.example.",
+  "format": "explainer",
+  "presenter": true,
+  "maxPresenterScenes": 2,
+  "targetSeconds": 45
+}
+```
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `brief` | string | **required** | 10–4000 chars. Include product name, audience, benefits, any real numbers, and the call to action — the planner is told not to invent facts, and stats not found in the brief are dropped |
+| `format` | `"explainer"` \| `"promo"` | `"explainer"` | |
+| `presenter` | boolean | `true` | `false` = voiceover-only |
+| `maxPresenterScenes` | integer | `2` | 0–3; each adds ~6 min |
+| `targetSeconds` | number | `45` | 15–120 (approximate — real length comes from the voiceover) |
+| `creative` | boolean | `false` | let the LLM write each scene's graphics as free-form HyperFrames HTML, gated by `hyperframes check`; any scene that fails falls back to its layout. Slower and less predictable |
+| `voice` | string | auto | Kokoro voice id (e.g. `bf_alice`, `bm_george`); default is picked from the presenter description |
+
+`POST` → `202 { job_id, status_url: "/agent/explainer/<id>" }`. While
+running, `GET` returns `{ "status": "processing", "progress": "<latest step>", "log": [...] }`.
+When done: `200`, `Content-Type: video/mp4`, with an `X-Explainer-Meta`
+header (URL-encoded JSON: `title`, per-scene `source` (`layout`/`llm`),
+`warnings`).
+
+Typical time: ~4 min with no presenter, ~16 min with two presenter scenes.
+
+```bash
+id=$(curl -s -X POST $HOST/agent/explainer \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"brief": "Promo for BrewBuddy, a smart coffee scale that times your pour-over and logs every brew. Launch price 59 pounds at brewbuddy.example.", "format": "promo", "presenter": false, "targetSeconds": 25}' \
+  | python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])')
+
+while curl -s $HOST/agent/explainer/$id -H "Authorization: Bearer $KEY" | grep -q '"processing"'; do sleep 20; done
+curl -s $HOST/agent/explainer/$id -H "Authorization: Bearer $KEY" -o promo.mp4
+```
+
+Each job's HyperFrames project is kept on the server under
+`alice-backend/data/explainers/<job_id>/` (`plan.json`, `assets.json`,
+`index.html`, `compositions/`, `assets/`, `out.mp4`) — it can be opened in
+HyperFrames Studio, or re-rendered after editing `plan.json` without
+regenerating any media via `recomposeExplainer(<job_id>)` in
+`src/agents/explainer/pipeline.js` (~25s).
+
+### Server setup (one-off, already done on the GPU box)
+
+HyperFrames needs Node 22+ while Alice runs on Node 20, so it's a separate
+pinned install, resolved by `src/agents/explainer/hyperframesCli.js`:
+
+```bash
+fnm install 22
+mkdir -p ~/.local/share/alice-hyperframes && cd ~/.local/share/alice-hyperframes
+echo '{"private":true}' > package.json
+fnm exec --using=22 npm i hyperframes@0.8.134 gsap@3.14.2
+```
+
+Plus static aarch64 `ffmpeg`/`ffprobe` in `~/.local/bin`, and the snap
+Chromium as the render browser (`HYPERFRAMES_BROWSER_PATH`, default
+`/snap/bin/chromium` — the puppeteer-cached Chrome builds on this box are
+x86-64 and won't run). Overrides: `HYPERFRAMES_HOME`, `HYPERFRAMES_NODE`,
+`FFPROBE_BIN`.
+
+### Errors
+
+`400` for an invalid `brief`/`format`/`maxPresenterScenes`/`targetSeconds`/`voice`.
+`502` pipeline failure (`error` + `log`), `503` ComfyUI offline, `404`
+unknown/expired `job_id`.
 
 ---
 

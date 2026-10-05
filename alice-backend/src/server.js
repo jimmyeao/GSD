@@ -9,7 +9,8 @@ import { getAgent } from './agents/registry.js';
 import { streamCompletion, complete, LLMUnavailableError } from './agents/llmClient.js';
 import { generateImage } from './agents/comfyClient.js';
 import { generateVideo, generateI2V, generateFL2V, generateRef2V, composeRef2VAPrompt, estimateDurationFromScript, looksLikeH3Script, looksLikeLTXScript, generateLTXVideo, generateLTXI2V, generateLTXFL2V, parseScriptChunks, generateChainedVideo } from './agents/videoClient.js';
-import { generateMusic } from './agents/musicClient.js';
+import { generateMusic, generateSfx } from './agents/musicClient.js';
+import { runExplainerPipeline, validateExplainerOptions } from './agents/explainer/pipeline.js';
 import { ensureComfyRunning, freeComfyMemory } from './comfyManager.js';
 import { routeByKeyword, routeWithLLM } from './router.js';
 import { buildPptx, parseSlideResponse } from './agents/slideBuilder.js';
@@ -32,6 +33,7 @@ import agentRoutes from './routes/agent.js';
 import openaiRoutes from './routes/openai.js';
 import { isTokenKeyValid } from './mail/tokens.js';
 import { mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync, statSync, renameSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 
 const app = express();
@@ -207,7 +209,7 @@ io.use(socketAuth);
 io.on('connection', (socket) => {
   console.log(`[ws] connected: ${socket.id} (user: ${socket.user.username})`);
 
-  socket.on('message', async ({ agent: requestedAgent, content, history = [], conversationId, imageData, lastFrameData, videoMode, videoModel, imageModel, imageAspect, upscale4k, references, lyrics, musicSeconds, chainImagesData }) => {
+  socket.on('message', async ({ agent: requestedAgent, content, history = [], conversationId, imageData, lastFrameData, videoMode, videoModel, imageModel, imageAspect, upscale4k, references, lyrics, musicSeconds, sfxSeconds, explainerOptions, chainImagesData }) => {
     if (!content?.trim()) return;
 
     let agentId = requestedAgent;
@@ -266,6 +268,18 @@ io.on('connection', (socket) => {
     // ── MusicAgent via ComfyUI (ACE-Step 1.5) ────────────────────
     if (agentId === 'MusicAgent') {
       await handleMusicAgent(socket, content, convId, lyrics, musicSeconds);
+      return;
+    }
+
+    // ── ExplainerAgent (HyperFrames pipeline) ──────────────────────
+    if (agentId === 'ExplainerAgent') {
+      await handleExplainerAgent(socket, content, convId, explainerOptions);
+      return;
+    }
+
+    // ── SfxAgent via ComfyUI (Stable Audio 3 Medium) ──────────────
+    if (agentId === 'SfxAgent') {
+      await handleSfxAgent(socket, content, convId, sfxSeconds);
       return;
     }
 
@@ -1242,7 +1256,9 @@ async function handleImageAgent(socket, prompt, convId, agentId, imageModel, ima
     // Flux.2 Dev is a 32B model — much heavier than ERNIE Turbo (8 steps) or
     // the SD fallback, so it gets its own longer budget rather than the
     // default 120s (config.models.comfyui.timeout) which is tuned for those.
-    const timeoutMs = imageModel === 'flux2' ? 600_000 : config.models.comfyui.timeout;
+    // Krea 2 Turbo is quick once warm, but its cold load (~35GB of BF16
+    // weights) can blow past 120s on its own, so it shares the same budget.
+    const timeoutMs = (imageModel === 'flux2' || imageModel === 'krea2') ? 600_000 : config.models.comfyui.timeout;
     const imgData = await generateImage(config.models.comfyui.endpoint, prompt, DEFAULT_NEGATIVE, timeoutMs, imageModel, imageAspect, upscale4k);
 
     // Cache image locally as a per-user asset
@@ -1679,6 +1695,90 @@ async function handleMusicAgent(socket, prompt, convId, lyrics, seconds) {
     } else {
       console.error('[MusicAgent] error:', err.message);
       socket.emit('error', { message: `MusicAgent error: ${err.message}` });
+    }
+  }
+}
+
+async function handleExplainerAgent(socket, prompt, convId, explainerOptions) {
+  const { opts, error } = validateExplainerOptions({ ...(explainerOptions ?? {}), brief: prompt });
+  if (error) {
+    socket.emit('error', { message: `ExplainerAgent: ${error}` });
+    return;
+  }
+  let fullResponse = '';
+  const say = (text) => { socket.emit('token', { token: text }); fullResponse += text; };
+  const id = randomUUID();
+  try {
+    const withPresenter = opts.presenter && opts.maxPresenterScenes > 0;
+    say(`Building a ~${opts.targetSeconds}s ${opts.format}${withPresenter ? ` with up to ${opts.maxPresenterScenes} presenter scene(s) — each takes ~6 min, so expect 10-25 minutes` : ' — expect about 4-6 minutes'}.\n\n`);
+    const out = await runExplainerPipeline(id, opts, (msg) => say(`> ${msg}\n`));
+    const filename = `explainer_${id.slice(0, 8)}.mp4`;
+    const assetId = saveAsset(socket.user.id, convId, 'video', filename, readFileSync(out.file), out.plan.title.slice(0, 80));
+    const videoUrl = assetUrl(socket, assetId);
+    const warn = out.warnings.length ? `\n\n_Notes: ${out.warnings.join('; ')}_` : '';
+    say(`\n**${out.plan.title}** is ready.${warn}\n\n[Download video](${videoUrl})\n\n<video controls width="640" src="${videoUrl}"></video>`);
+    if (convId) {
+      stmts.insertMessage.run(convId, 'assistant', 'ExplainerAgent', fullResponse);
+      stmts.touchConversation.run(convId);
+    }
+    socket.emit('done', { agent: 'ExplainerAgent' });
+    console.log(`[ExplainerAgent] ${id} → ${out.file}`);
+  } catch (err) {
+    console.error('[ExplainerAgent] error:', err);
+    socket.emit('error', { message: `ExplainerAgent error: ${err.message}` });
+  }
+}
+
+async function handleSfxAgent(socket, prompt, convId, seconds) {
+  let fullResponse = '';
+  // Same 1-120s range /agent/sfx enforces (routes/agent.js).
+  const targetSeconds = Math.min(Math.max(Number(seconds) || 5, 1), 120);
+  try {
+    const msg1 = `Starting ComfyUI and generating a ${targetSeconds}s sound effect...\n\n`;
+    socket.emit('token', { token: msg1 });
+    fullResponse += msg1;
+
+    await ensureComfyRunning();
+    const onProgress = (msg) => socket.emit('token', { token: `> ${msg}\n` });
+    const audioData = await generateSfx(config.models.comfyui.endpoint, prompt, targetSeconds, 600_000, onProgress);
+
+    // Same per-user asset handling as handleMusicAgent.
+    const cachedPath = join(__dirname, '..', 'data', 'audio', audioData.filename);
+    let audioUrl;
+    try {
+      const { readFileSync } = await import('node:fs');
+      const buffer = readFileSync(cachedPath);
+      const assetId = saveAsset(socket.user.id, convId, 'audio', audioData.filename, buffer, prompt.slice(0, 80));
+      audioUrl = assetUrl(socket, assetId);
+      try { unlinkSync(cachedPath); } catch { /* ignore */ }
+    } catch {
+      audioUrl = `/api/audio/${encodeURIComponent(audioData.filename)}`;
+    }
+
+    freeComfyMemory();
+
+    const msg2 = `Sound effect generated successfully!\n\n[Download audio](${audioUrl})\n\n<audio controls src="${audioUrl}"></audio>`;
+    socket.emit('token', { token: msg2 });
+    fullResponse += msg2;
+
+    if (convId) {
+      stmts.insertMessage.run(convId, 'assistant', 'SfxAgent', fullResponse);
+      stmts.touchConversation.run(convId);
+    }
+    socket.emit('done', { agent: 'SfxAgent' });
+    console.log(`[SfxAgent] generated ${audioData.filename}`);
+  } catch (err) {
+    freeComfyMemory();
+    const isOffline = err.code === 'ECONNREFUSED'
+      || err.cause?.code === 'ECONNREFUSED'
+      || err.message.includes('fetch failed');
+
+    if (isOffline) {
+      socket.emit('token', { token: '> ComfyUI is not running. Start ComfyUI with the Stable Audio 3 model to generate sound effects.\n' });
+      socket.emit('done', { agent: 'SfxAgent' });
+    } else {
+      console.error('[SfxAgent] error:', err.message);
+      socket.emit('error', { message: `SfxAgent error: ${err.message}` });
     }
   }
 }

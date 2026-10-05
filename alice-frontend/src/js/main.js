@@ -22,7 +22,7 @@ let _optimiseTimer = null;
 let attachedFiles = []; // [{ name, content, isImage, isAudio, refLabel }]
 let videoMode = 't2v'; // VideoAgent only: 't2v'|'i2v'|'fl2v'|'ref2va', explicit (not inferred from attachment count)
 let videoModel = 'h3'; // VideoAgent only: 'h3'|'ltx' — LTX has no ref2va mode
-let imageModel = 'auto'; // ImageAgent only: 'auto'|'flux2'
+let imageModel = 'auto'; // ImageAgent only: 'auto'|'flux2'|'krea2'
 let imageAspect = 'square'; // ImageAgent+flux2 only: 'square'|'landscape'|'portrait'
 let upscale4k = false; // ImageAgent+flux2 only
 let currentConversationId = null;
@@ -76,6 +76,13 @@ const musicOptionsRow  = document.getElementById('music-options-row');
 const musicDurationInput = document.getElementById('music-duration-input');
 const musicLyricsToggle = document.getElementById('music-lyrics-toggle');
 const musicLyricsInput = document.getElementById('music-lyrics-input');
+const sfxOptionsRow    = document.getElementById('sfx-options-row');
+const sfxDurationInput = document.getElementById('sfx-duration-input');
+const explainerOptionsRow = document.getElementById('explainer-options-row');
+const explainerFormatSelect = document.getElementById('explainer-format-select');
+const explainerSecondsInput = document.getElementById('explainer-seconds-input');
+const explainerPresenterSelect = document.getElementById('explainer-presenter-select');
+const explainerCreativeToggle = document.getElementById('explainer-creative-toggle');
 const authModal      = document.getElementById('auth-modal');
 const authError      = document.getElementById('auth-error');
 const btnMsLogin     = document.getElementById('btn-ms-login');
@@ -287,6 +294,8 @@ function selectAgent(agent) {
 
   // Music options only make sense for MusicAgent.
   if (musicOptionsRow) musicOptionsRow.hidden = agent.id !== 'MusicAgent';
+  if (sfxOptionsRow) sfxOptionsRow.hidden = agent.id !== 'SfxAgent';
+  if (explainerOptionsRow) explainerOptionsRow.hidden = agent.id !== 'ExplainerAgent';
 
   renderAttachedFileBadges();
 
@@ -987,6 +996,21 @@ function handleSend() {
     lyrics = (musicLyricsToggle?.checked && musicLyricsInput?.value.trim()) || null;
     musicSeconds = Number(musicDurationInput?.value) || 30;
   }
+  let sfxSeconds = null;
+  if (selectedAgent.id === 'SfxAgent') {
+    sfxSeconds = Number(sfxDurationInput?.value) || 5;
+  }
+  let explainerOptions = null;
+  if (selectedAgent.id === 'ExplainerAgent') {
+    const presenterScenes = Number(explainerPresenterSelect?.value ?? 2);
+    explainerOptions = {
+      format: explainerFormatSelect?.value || 'explainer',
+      targetSeconds: Number(explainerSecondsInput?.value) || 45,
+      presenter: presenterScenes > 0,
+      maxPresenterScenes: presenterScenes,
+      creative: !!explainerCreativeToggle?.checked,
+    };
+  }
 
   chat.addUserMessage(text, files);
   chat.startAssistantStream(selectedAgent.label);
@@ -997,7 +1021,7 @@ function handleSend() {
   autoResizeTextarea();
 
   try {
-    client.sendMessage(selectedAgent.id, content, chat.history.slice(0, -2), currentConversationId, imageData, lastFrameData, videoMode, references, videoModel, lyrics, musicSeconds, chainImagesData, imageModel, imageAspect, upscale4k);
+    client.sendMessage(selectedAgent.id, content, chat.history.slice(0, -2), currentConversationId, imageData, lastFrameData, videoMode, references, videoModel, lyrics, musicSeconds, chainImagesData, imageModel, imageAspect, upscale4k, sfxSeconds, explainerOptions);
   } catch (err) {
     chat.finaliseStream();
     chat.addErrorMessage(err.message);

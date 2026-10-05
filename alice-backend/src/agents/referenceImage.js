@@ -24,7 +24,7 @@ export async function generateReferenceImage(prompt, opts = {}) {
     height,
   } = opts;
   await ensureComfyRunning();
-  const timeoutMs = imageModel === 'flux2' ? 600_000 : config.models.comfyui.timeout;
+  const timeoutMs = (imageModel === 'flux2' || imageModel === 'krea2') ? 600_000 : config.models.comfyui.timeout;
   const customSize = (width && height) ? { width, height } : null;
   const imgData = await generateImage(
     config.models.comfyui.endpoint, prompt, '', timeoutMs,

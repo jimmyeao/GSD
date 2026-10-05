@@ -1,9 +1,9 @@
 /**
  * ComfyUI integration for ImageAgent.
  *
- * Supports three workflows — aspect ratio (square/landscape/portrait, see
+ * Supports four workflows — aspect ratio (square/landscape/portrait, see
  * ASPECT_SIZES below) and an optional RealESRGAN 4K upscale pass apply to
- * all three, not just Flux.2:
+ * all four, not just Flux.2:
  *   1. ERNIE Image Turbo — UNETLoader + CLIPLoader (Ministral 3B) + VAELoader (Flux2)
  *      steps: 8, cfg: 1, scheduler: simple — auto-detected from /object_info.
  *   2. Standard SD     — CheckpointLoaderSimple + KSampler
@@ -12,11 +12,17 @@
  *      request only (via generateImage's imageModel param), not part of
  *      auto-detection — mirrors ComfyUI's official "Text to Image (Flux.2 Dev)"
  *      blueprint at full 20-step quality (no turbo LoRA).
+ *   4. Krea 2 Turbo — UNETLoader + CLIPLoader (Qwen3-VL-4B, type krea2) + Qwen
+ *      Image VAE, explicit request only (imageModel 'krea2') — mirrors ComfyUI's
+ *      official "Text to Image (Krea-2 Turbo)" template: steps 8, cfg 1, euler,
+ *      simple. The template's optional TextGenerate prompt-enhancement step is
+ *      left out (Alice's own prompt optimizer already covers that).
  */
 
 /** Cached workflow config — detected once per process lifetime. */
 let _workflowConfig = null;
 let _flux2Config = null;
+let _krea2Config = null;
 
 /**
  * Query /object_info and determine the best available workflow.
@@ -97,7 +103,36 @@ async function detectFlux2Config(endpoint) {
   return _flux2Config;
 }
 
-// ── Aspect ratio + upscale helpers (shared by all three workflows) ─────────────
+/**
+ * Query /object_info for Krea 2 Turbo's model files — same explicit-request,
+ * no-fallback contract as detectFlux2Config. Prefers the turbo checkpoint
+ * (8-step distilled) over raw (52-step base, meant for LoRA training).
+ */
+async function detectKrea2Config(endpoint) {
+  if (_krea2Config) return _krea2Config;
+
+  const res = await fetch(`${endpoint}/object_info`, { signal: AbortSignal.timeout(5_000) });
+  if (!res.ok) throw new Error(`object_info ${res.status}`);
+  const data = await res.json();
+
+  const unetModels = data?.UNETLoader?.input?.required?.unet_name?.[0] ?? [];
+  const clipModels  = data?.CLIPLoader?.input?.required?.clip_name?.[0] ?? [];
+  const vaeModels   = data?.VAELoader?.input?.required?.vae_name?.[0]  ?? [];
+
+  const unetName = unetModels.find(m => /krea2_turbo/i.test(m));
+  const clipName = clipModels.find(m => /qwen3vl_4b/i.test(m));
+  const vaeName  = vaeModels.find(m => /qwen_image_vae/i.test(m));
+
+  if (!unetName || !clipName || !vaeName) {
+    throw new Error(`Krea 2 model files not found in ComfyUI (unet: ${unetName ?? 'missing'}, clip: ${clipName ?? 'missing'}, vae: ${vaeName ?? 'missing'})`);
+  }
+
+  console.log(`[ComfyUI] Krea 2 Turbo — unet: ${unetName}, clip: ${clipName}, vae: ${vaeName}`);
+  _krea2Config = { unetName, clipName, vaeName };
+  return _krea2Config;
+}
+
+// ── Aspect ratio + upscale helpers (shared by all four workflows) ──────────────
 
 // ERNIE Turbo shares Flux.2's own VAE/latent space (see detectWorkflowConfig's
 // ernieVae pairing), so the same base resolutions that suit Flux.2 Dev suit
@@ -108,6 +143,13 @@ const ASPECT_SIZES = {
     square:    { width: 1024, height: 1024 },
     landscape: { width: 1920, height: 1080 },
     portrait:  { width: 1080, height: 1920 },
+  },
+  // Krea 2's template targets ~1MP (ResolutionSelector at 1.0MP, multiple of
+  // 8) — 16:9 at 1MP rounds to 1368×768, not Flux.2's ~2MP 1920×1080.
+  krea2: {
+    square:    { width: 1024, height: 1024 },
+    landscape: { width: 1368, height: 768 },
+    portrait:  { width: 768,  height: 1368 },
   },
   sd: {
     square:    { width: 512, height: 512 },
@@ -132,7 +174,7 @@ function resolveSize(sizeMap, aspect, customSize) {
  * Append a RealESRGAN 2x upscale pass after the given image link, returning
  * the new final-image link — or the original link unchanged if disabled.
  * Mutates `nodes` in place. Node ids 14/15 are reserved for this across all
- * three workflow builders (none of them use those ids for anything else).
+ * four workflow builders (none of them use those ids for anything else).
  */
 function appendUpscale4k(nodes, imageLink, enabled) {
   if (!enabled) return imageLink;
@@ -255,6 +297,43 @@ function buildFlux2DevWorkflow(positivePrompt, unetName, clipName, vaeName, aspe
   return nodes;
 }
 
+/**
+ * Krea 2 Turbo workflow — matches ComfyUI's official "Text to Image (Krea-2
+ * Turbo)" template's core subgraph (no LoRA, no prompt enhancement): plain
+ * EmptyLatentImage, zeroed-out negative, KSampler steps=8 cfg=1 euler/simple.
+ */
+function buildKrea2Workflow(positivePrompt, unetName, clipName, vaeName, aspect = 'square', upscale4k = false, customSize = null) {
+  const seed = Math.floor(Math.random() * 2 ** 32);
+  const { width, height } = resolveSize(ASPECT_SIZES.krea2, aspect, customSize);
+  const nodes = {
+    '1': { class_type: 'UNETLoader',          inputs: { unet_name: unetName, weight_dtype: 'default' } },
+    '2': { class_type: 'CLIPLoader',          inputs: { clip_name: clipName, type: 'krea2', device: 'default' } },
+    '3': { class_type: 'VAELoader',           inputs: { vae_name: vaeName } },
+    '4': { class_type: 'EmptyLatentImage',    inputs: { width, height, batch_size: 1 } },
+    '5': { class_type: 'CLIPTextEncode',      inputs: { text: positivePrompt, clip: ['2', 0] } },
+    '6': { class_type: 'ConditioningZeroOut', inputs: { conditioning: ['5', 0] } },
+    '7': {
+      class_type: 'KSampler',
+      inputs: {
+        model:        ['1', 0],
+        positive:     ['5', 0],
+        negative:     ['6', 0],
+        latent_image: ['4', 0],
+        seed,
+        steps:        8,
+        cfg:          1,
+        sampler_name: 'euler',
+        scheduler:    'simple',
+        denoise:      1,
+      },
+    },
+    '8': { class_type: 'VAEDecode', inputs: { samples: ['7', 0], vae: ['3', 0] } },
+  };
+  const finalImage = appendUpscale4k(nodes, ['8', 0], upscale4k);
+  nodes['9'] = { class_type: 'SaveImage', inputs: { filename_prefix: 'alice_krea2', images: finalImage } };
+  return nodes;
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -266,6 +345,9 @@ export async function generateImage(endpoint, positivePrompt, negativePrompt = '
   if (imageModel === 'flux2') {
     const flux2Config = await detectFlux2Config(endpoint);
     workflow = buildFlux2DevWorkflow(positivePrompt, flux2Config.unetName, flux2Config.clipName, flux2Config.vaeName, imageAspect, upscale4k, customSize);
+  } else if (imageModel === 'krea2') {
+    const krea2Config = await detectKrea2Config(endpoint);
+    workflow = buildKrea2Workflow(positivePrompt, krea2Config.unetName, krea2Config.clipName, krea2Config.vaeName, imageAspect, upscale4k, customSize);
   } else {
     const config = await detectWorkflowConfig(endpoint);
     workflow = config.type === 'ernie-turbo'

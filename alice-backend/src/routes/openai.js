@@ -42,7 +42,7 @@ const router = Router();
 router.use(requireApiKey);
 
 const CHAT_MODELS = ['alice-general', 'alice-coder', 'alice-mail', 'alice-vision'];
-const IMAGE_MODELS = ['auto', 'flux2'];
+const IMAGE_MODELS = ['auto', 'flux2', 'krea2'];
 
 function isOfflineError(err) {
   return err.code === 'ECONNREFUSED' || err.cause?.code === 'ECONNREFUSED' || err.message.includes('fetch failed');
@@ -155,7 +155,7 @@ router.post('/images/generations', async (req, res) => {
 
   try {
     await ensureComfyRunning();
-    const timeoutMs = imageModel === 'flux2' ? 600_000 : config.models.comfyui.timeout;
+    const timeoutMs = (imageModel === 'flux2' || imageModel === 'krea2') ? 600_000 : config.models.comfyui.timeout;
     const images = [];
     // Sequential, not parallel — ComfyUI/the GPU host runs one generation
     // at a time regardless, so parallel requests would just queue anyway.

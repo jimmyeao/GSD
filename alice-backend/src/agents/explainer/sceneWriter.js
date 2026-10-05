@@ -1,0 +1,210 @@
+/**
+ * LLM-written scene graphics for the explainer pipeline.
+ *
+ * Each scene gets its own HyperFrames sub-composition (a transparent
+ * overlay: headline, bullets, shapes, motion), mounted at its scene's safe
+ * area. The model writes the whole file; we gate it with cheap static checks
+ * + `hyperframes check` (lint, runtime console errors, layout overlap/
+ * overflow, contrast — in a real browser), feed the exact findings back for
+ * up to MAX_FIX_ROUNDS repairs, and fall back to the
+ * deterministic template (timeline.js fallbackSceneHtml) for any scene that
+ * still fails — so a weak generation can only make a scene plainer, never
+ * break the render.
+ *
+ * All scenes are generated concurrently (vLLM batches them); one `check`
+ * per round then covers every candidate scene at once.
+ */
+
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { complete } from '../llmClient.js';
+import { ALLOWED_FONTS } from './planner.js';
+import { SAFE_AREAS, fallbackSceneHtml } from './timeline.js';
+
+const MAX_FIX_ROUNDS = 2;
+const ANTI_SECOND_GUESS = 'Think briefly, write the file once, and output it immediately — do not reconsider, revise, or second-guess it once written.';
+
+const RULES = `You write ONE HyperFrames sub-composition file: a transparent motion-graphics overlay for one scene of a video. Your canvas is CANVAS_W x CANVAS_H pixels (it is placed in a safe region of the 1920x1080 frame for you). Output ONLY the HTML file, no prose, no code fences.
+
+Exact file shape (everything inside <template>):
+<!doctype html>
+<html><head><meta charset="UTF-8" /></head>
+<body><template>
+<style>
+  #root { position: absolute; inset: 0; }   /* style the root by #root, never by class */
+  /* your styles — prefix every id with the composition id */
+</style>
+<div id="root" data-composition-id="COMP_ID" data-width="CANVAS_W" data-height="CANVAS_H">
+  <!-- your markup -->
+</div>
+<script>
+  const tl = gsap.timeline({ paused: true });
+  // your tweens, positioned with absolute times in seconds (third argument)
+  window.__timelines["COMP_ID"] = tl;
+</script>
+</template></body></html>
+
+Hard rules (violations are rejected):
+- gsap is already loaded. Build exactly one paused timeline and register it as shown. No other scripts, no imports.
+- Every tween starts within the scene duration; the last tween ends before it.
+- Set initial states in the tween (gsap.fromTo / from), never with a CSS transform on the same property.
+- Center with flexbox or inset, not translate(-50%,-50%).
+- No <img>, <video>, <audio>, <iframe>, <canvas>, no url(), no http links — text, divs, inline SVG and CSS gradients only.
+- No Math.random, Date, setTimeout, setInterval, requestAnimationFrame, repeat: -1.
+- Core gsap only: NO plugins (no text: tweens, SplitText, TextPlugin, ScrambleText, MotionPath, DrawSVG, registerPlugin). To animate words, wrap each word in its own <span> and tween the spans. For a counting number, tween a plain object and write Math.round(value) into textContent in onUpdate.
+- Text blocks must never overlap each other: give each block its own position (stack them with flexbox column + gap, or distinct top values).
+- No <br>. Elements you transform must be block or inline-block.
+- font-family must be the given font (plus a generic fallback). No other named fonts.
+- Background stays transparent (the video/image underneath must show through).
+- Keep everything inside the CANVAS_W x CANVAS_H canvas; text must wrap within it (set max-width), never overflow.
+- Text must be large and readable: headlines 64-120px, body 36-52px.
+${ANTI_SECOND_GUESS}`;
+
+export function buildScenePrompt(compId, scene, { palette, font, duration, words }) {
+  const area = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
+  const cues = (words ?? []).slice(0, 60).map(w => `${w.start.toFixed(2)}s "${w.text}"`).join(', ');
+  const context = {
+    title: 'a full-screen title card over a dark gradient',
+    outro: 'the closing call-to-action card over a dark gradient',
+    narrated: 'a voiceover scene over a darkened full-screen photo',
+    presenter: 'a narrow text column beside the presenter, who is on camera to the right — keep it compact and left-aligned',
+  }[scene.type];
+  const user = `COMP_ID: ${compId}
+Scene type: ${scene.type} (${context})
+Duration: ${duration.toFixed(2)} seconds
+Canvas: ${area.width} x ${area.height}
+Font: "${font}"
+Palette: text ${palette.text}, accent ${palette.accent}, background ${palette.bg}
+Headline: ${scene.headline || '(none)'}
+Bullets: ${scene.bullets.length ? scene.bullets.map(b => `"${b}"`).join(', ') : '(none)'}
+Motion idea: ${scene.visual_idea || 'clean, confident entrances'}
+${cues ? `Spoken word timings (scene-local) — reveal each bullet near the word it relates to: ${cues}` : ''}`;
+  const system = RULES.replaceAll('COMP_ID', compId).replaceAll('CANVAS_W', String(area.width)).replaceAll('CANVAS_H', String(area.height));
+  return [{ role: 'system', content: system }, { role: 'user', content: user }];
+}
+
+/** Strip fences/prose around the file the model returned. */
+export function extractHtml(reply) {
+  if (!reply) return '';
+  const text = reply.replace(/```(?:html)?/gi, '');
+  const start = text.search(/<!doctype html|<html/i);
+  const end = text.toLowerCase().lastIndexOf('</html>');
+  return start >= 0 && end > start ? text.slice(start, end + 7).trim() : '';
+}
+
+/**
+ * Cheap pre-check rules that lint/check don't (reliably) enforce.
+ * Returns a list of human-readable problems ([] = pass).
+ */
+export function staticCheck(html, compId, font, scene = null) {
+  const problems = [];
+  if (!html) return ['no HTML file found in the reply'];
+  if (scene) {
+    // Every piece of planned on-screen text must actually be in the file.
+    const visible = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ')
+      .replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').toLowerCase();
+    const missing = [scene.headline?.replace(/\*/g, ''), ...(scene.bullets ?? [])]
+      .filter(Boolean).filter(t => !visible.includes(t.toLowerCase().replace(/\s+/g, ' ').trim()));
+    if (missing.length) problems.push(`missing on-screen text (must appear verbatim as visible text): ${missing.map(t => `"${t}"`).join(', ')}`);
+  }
+  if (!/<template>[\s\S]*<\/template>/i.test(html)) problems.push('everything must be inside <template>…</template>');
+  if (!html.includes(`data-composition-id="${compId}"`)) problems.push(`root must have data-composition-id="${compId}"`);
+  if (!new RegExp(`window\\.__timelines\\[["']${compId}["']\\]\\s*=`).test(html)) problems.push(`register the timeline as window.__timelines["${compId}"] = tl`);
+  if (/<(img|video|audio|iframe|canvas)\b/i.test(html)) problems.push('no <img>/<video>/<audio>/<iframe>/<canvas> elements');
+  if (/url\(|https?:\/\//i.test(html)) problems.push('no url() or http(s) links');
+  if (/Math\.random|Date\.now|new Date|setTimeout|setInterval|requestAnimationFrame|repeat:\s*-1/.test(html)) problems.push('no Math.random/Date/timers/infinite repeats');
+  if (/<br\b/i.test(html)) problems.push('no <br>');
+  if (/<script[^>]+src=/i.test(html)) problems.push('no external scripts');
+  if (/registerPlugin|SplitText|TextPlugin|ScrambleText|MotionPath|DrawSVG|MorphSVG|\btext\s*:\s*["'`{]/.test(html)) problems.push('no gsap plugins (no text: tweens) — wrap words in spans, or tween a plain object and set textContent in onUpdate');
+  for (const m of html.matchAll(/font-family\s*:\s*([^;}"]*(?:"[^"]*"[^;}"]*)*)/gi)) {
+    for (const f of m[1].split(',').map(s => s.trim().replace(/^['"]|['"]$/g, ''))) {
+      if (f && !/^(sans-serif|serif|monospace|system-ui|inherit)$/i.test(f) && f !== font && !ALLOWED_FONTS.includes(f)) {
+        problems.push(`font "${f}" is not allowed — use "${font}"`);
+      }
+    }
+  }
+  return problems;
+}
+
+/**
+ * Does a check finding belong to scene i? By source file when it names a
+ * scene file; otherwise (runtime console messages report the root file) by
+ * the sample time falling inside the scene's slot.
+ */
+export function belongsTo(f, i, slots) {
+  const m = /scene-(\d+)\.html$/.exec(f.sourceFile ?? '');
+  if (m) return Number(m[1]) === i;
+  if (f.stage !== 'runtime' || !Number.isFinite(f.time) || !slots?.[i]) return false;
+  return f.time >= slots[i].start && f.time < slots[i].start + slots[i].duration;
+}
+
+function fixMessage(problems) {
+  return `That file was rejected:\n${problems.map(p => `- ${p}`).join('\n')}\nReturn the complete corrected file only.`;
+}
+
+/**
+ * Write compositions/scene-N.html for every scene.
+ * @param {string} projectDir
+ * @param {object} plan
+ * @param {{duration:number, words?:object[]}[]} sceneInfo per scene
+ * @param {{llm:{endpoint,model}, check:(dir)=>Promise<{findings}>, slots:{start,duration}[], onProgress?:fn, completeFn?:fn}} deps
+ * @returns {Promise<{index:number, source:'llm'|'fallback', rounds:number}[]>}
+ */
+export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slots, onProgress = () => {}, completeFn = complete }) {
+  const { palette, font } = plan;
+  const states = plan.scenes.map((scene, i) => ({
+    index: i, compId: `scene-${i}`, scene, rounds: 0, done: false, source: 'fallback',
+    messages: buildScenePrompt(`scene-${i}`, scene, { palette, font, duration: sceneInfo[i].duration, words: sceneInfo[i].words }),
+    html: '',
+  }));
+  const file = (s) => join(projectDir, 'compositions', `${s.compId}.html`);
+  const ask = async (s) => {
+    try {
+      const reply = await completeFn(llm.endpoint, llm.model, s.messages, { numPredict: 12_000, temperature: 0.5, signal: AbortSignal.timeout(420_000) });
+      s.messages.push({ role: 'assistant', content: reply || '(empty)' });
+      s.html = extractHtml(reply);
+    } catch (err) {
+      s.html = '';
+      s.llmError = err.message;
+    }
+  };
+
+  // Every scene starts as the template, so the project always checks/renders.
+  for (const s of states) writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
+
+  let pending = states;
+  for (let round = 0; round <= MAX_FIX_ROUNDS && pending.length; round++) {
+    onProgress(round === 0 ? `Writing graphics for ${pending.length} scene(s)…` : `Fixing ${pending.length} scene(s) (round ${round})…`);
+    await Promise.all(pending.map(ask));
+
+    const next = [];
+    const candidates = [];
+    for (const s of pending) {
+      s.rounds = round + 1;
+      s.problems = staticCheck(s.html, s.compId, font, s.scene);
+      if (s.problems.length) writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
+      else { writeFileSync(file(s), s.html); candidates.push(s); }
+    }
+    // One browser check per round covers every candidate scene at once.
+    if (candidates.length) {
+      const { findings } = await check(projectDir);
+      for (const s of candidates) {
+        s.problems = findings.filter(f => belongsTo(f, s.index, slots)).map(f => `${f.code}: ${f.message}${f.text ? ` [text: "${f.text}"]` : ''}${f.fixHint ? ` (fix: ${f.fixHint})` : ''}`);
+      }
+    }
+    for (const s of pending) {
+      if (s.problems.length) {
+        writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
+        if (!s.llmError) {
+          s.messages.push({ role: 'user', content: fixMessage(s.problems) });
+          next.push(s);
+        }
+      } else {
+        s.done = true;
+        s.source = 'llm';
+      }
+    }
+    pending = next;
+  }
+  return states.map(s => ({ index: s.index, source: s.source, rounds: s.rounds }));
+}

@@ -199,6 +199,22 @@ export const AGENTS = [
     icon: '🎵',
     model: 'ComfyUI',
   },
+  {
+    id: 'ExplainerAgent',
+    label: 'Explainer',
+    description: 'Turns a product or topic brief into a finished explainer or promo video: planned scenes, voiceover, an on-camera presenter, background images, music, captions and motion graphics. Takes 10-25 minutes.',
+    example: 'Explainer for PulseBoard, an analytics dashboard for small e-commerce teams: connects to Shopify and Stripe in two clicks, replaces weekly spreadsheet reporting, beta teams cut reporting time by 87%. Free 14-day trial.',
+    icon: '🎞️',
+    model: 'ComfyUI',
+  },
+  {
+    id: 'SfxAgent',
+    label: 'Sound FX',
+    description: 'Generates sound effects, ambience and one-shots with Stable Audio 3. Describe the source, material and space; set a duration (impacts 1-3s, ambience 6-15s+).',
+    example: 'Glass bottle shattering on a concrete floor, close-up, sharp impact then tinkling shards.',
+    icon: '🔊',
+    model: 'ComfyUI',
+  },
 ];
 
 export const MODEL_BADGE_CLASS = {

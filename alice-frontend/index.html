@@ -299,6 +299,7 @@
         <select id="image-model-select">
           <option value="auto">Auto (ERNIE Turbo / SD)</option>
           <option value="flux2">Flux.2 Dev (slower, higher fidelity)</option>
+          <option value="krea2">Krea 2 Turbo (fast, aesthetic)</option>
         </select>
         <span id="image-flux2-options">
           <label for="image-aspect-select">Aspect</label>
@@ -318,6 +319,28 @@
         <label for="music-lyrics-input">Lyrics (optional — empty = instrumental)</label>
         <input id="music-lyrics-toggle" type="checkbox" title="Add lyrics" />
         <textarea id="music-lyrics-input" rows="3" placeholder="[Verse 1]..." hidden></textarea>
+      </div>
+      <div id="explainer-options-row" hidden>
+        <label for="explainer-format-select">Type</label>
+        <select id="explainer-format-select">
+          <option value="explainer">Explainer</option>
+          <option value="promo">Product promo</option>
+        </select>
+        <label for="explainer-seconds-input">Length (s)</label>
+        <input id="explainer-seconds-input" type="number" min="15" max="120" step="5" value="45" />
+        <label for="explainer-presenter-select">Presenter scenes</label>
+        <select id="explainer-presenter-select">
+          <option value="0">None</option>
+          <option value="1">1</option>
+          <option value="2" selected>2</option>
+          <option value="3">3</option>
+        </select>
+        <label for="explainer-creative-toggle" title="Let the LLM design each scene's graphics (slower, less predictable; falls back to the standard layout if a scene fails checks)">Creative graphics</label>
+        <input id="explainer-creative-toggle" type="checkbox" />
+      </div>
+      <div id="sfx-options-row" hidden>
+        <label for="sfx-duration-input">Duration (s)</label>
+        <input id="sfx-duration-input" type="number" min="1" max="120" step="1" value="5" />
       </div>
       <div id="attached-files" hidden></div>
       <div id="input-row">
