@@ -1,0 +1,4 @@
+{
+  "_comment": "Spoken respellings for TTS (Kokoro) and generated presenter speech. Key = word as written (case-insensitive, whole word); value = how it should sound, written as a respelling. Captions and on-screen text keep the original spelling. Per-video overrides come from the chat (\"X is pronounced Y\").",
+  "TheiaCast": "Theeahcast"
+}

@@ -72,3 +72,19 @@ describe('fallbackSceneHtml', () => {
     assert.equal((f.match(/fromTo\("#scene-2-b\d"/g) ?? []).length, 2);
   });
 });
+
+describe('alignScriptWords', async () => {
+  const { alignScriptWords } = await import('../src/agents/explainer/timeline.js');
+  it('keeps the script spelling and takes timing from ASR', () => {
+    const asr = [{ text: 'Meet', start: 0.1, end: 0.3 }, { text: 'TheaCast,', start: 0.35, end: 0.9 }, { text: 'your', start: 1.0, end: 1.2 }, { text: 'signage', start: 1.25, end: 1.7 }, { text: 'app.', start: 1.75, end: 2.0 }];
+    const w = alignScriptWords('Meet TheiaCast, your signage app.', asr);
+    assert.deepEqual(w.map(x => x.text), ['Meet', 'TheiaCast,', 'your', 'signage', 'app.']);
+    assert.equal(w[0].start, 0.1);
+    assert.ok(w[1].start >= 0.3 && w[1].end <= 1.0); // interpolated into the gap
+    assert.equal(w[2].start, 1.0);
+  });
+  it('spreads evenly with no transcript', () => {
+    const w = alignScriptWords('a b c d', [], 2);
+    assert.deepEqual(w.map(x => x.start), [0, 0.5, 1, 1.5]);
+  });
+});

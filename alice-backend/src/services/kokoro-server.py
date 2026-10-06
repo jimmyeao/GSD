@@ -27,6 +27,12 @@ class Handler(BaseHTTPRequestHandler):
         text = body.get('text', '').strip()
         voice = body.get('voice', 'bf_alice')
         speed = float(body.get('speed', 1.0))
+        # Phonemize in the voice's own accent. kokoro-onnx defaults to en-us,
+        # so British voices (bf_/bm_) were reading American phonemes —
+        # e.g. "copy" as kˈɑːpi ("kah-pee") instead of kˈɒpɪ.
+        lang = body.get('lang') or ('en-gb' if voice[:1] == 'b' else 'en-us')
+        if lang not in ('en-gb', 'en-us'):
+            lang = 'en-us'
 
         if not text:
             self.send_response(400)
@@ -35,7 +41,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            samples, sr = kokoro.create(text, voice=voice, speed=speed)
+            samples, sr = kokoro.create(text, voice=voice, speed=speed, lang=lang)
             buf = io.BytesIO()
             sf.write(buf, samples, sr, format='WAV')
             wav = buf.getvalue()

@@ -1000,8 +1000,12 @@ function handleSend() {
   if (selectedAgent.id === 'SfxAgent') {
     sfxSeconds = Number(sfxDurationInput?.value) || 5;
   }
-  let explainerOptions = null;
+  let explainerOptions = null, explainerImages = null;
   if (selectedAgent.id === 'ExplainerAgent') {
+    // Logo / screenshots for the video — the backend classifies them.
+    const imageFiles = files.filter(f => f.isImage);
+    explainerImages = imageFiles.length ? imageFiles.map(f => ({ name: f.name, dataUrl: f.content })) : null;
+    imageData = null; lastFrameData = null;
     const presenterScenes = Number(explainerPresenterSelect?.value ?? 2);
     explainerOptions = {
       format: explainerFormatSelect?.value || 'explainer',
@@ -1021,7 +1025,7 @@ function handleSend() {
   autoResizeTextarea();
 
   try {
-    client.sendMessage(selectedAgent.id, content, chat.history.slice(0, -2), currentConversationId, imageData, lastFrameData, videoMode, references, videoModel, lyrics, musicSeconds, chainImagesData, imageModel, imageAspect, upscale4k, sfxSeconds, explainerOptions);
+    client.sendMessage(selectedAgent.id, content, chat.history.slice(0, -2), currentConversationId, imageData, lastFrameData, videoMode, references, videoModel, lyrics, musicSeconds, chainImagesData, imageModel, imageAspect, upscale4k, sfxSeconds, explainerOptions, explainerImages);
   } catch (err) {
     chat.finaliseStream();
     chat.addErrorMessage(err.message);

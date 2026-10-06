@@ -83,7 +83,7 @@ describe('validateExplainerOptions', async () => {
   const { validateExplainerOptions } = await import('../src/agents/explainer/pipeline.js');
   it('applies defaults and trims the brief', () => {
     const { opts } = validateExplainerOptions({ brief: '  A brief about a product  ' });
-    assert.deepEqual(opts, { brief: 'A brief about a product', format: 'explainer', presenter: true, maxPresenterScenes: 2, targetSeconds: 45, creative: false, voice: undefined });
+    assert.deepEqual(opts, { brief: 'A brief about a product', format: 'explainer', presenter: true, maxPresenterScenes: 2, targetSeconds: 45, creative: false, voice: undefined, images: [] });
   });
   it('rejects bad input', () => {
     assert.match(validateExplainerOptions({ brief: 'short' }).error, /brief/);
@@ -106,5 +106,36 @@ describe('grounded stats', async () => {
   it('normalizePlan applies it', () => {
     const p = normalizePlan({ scenes: [{ type: 'narrated', speech: 'Hi there.', layout: 'stat', stat: { from: 0, to: 78 } }] }, { ...opts, brief: 'no numbers here' });
     assert.equal(p.scenes.find(s => s.type === 'narrated').stat, null);
+  });
+});
+
+describe('bookend repair', () => {
+  it('turns a trailing CTA scene into the outro instead of appending another', () => {
+    const p = normalizePlan({ scenes: [
+      { type: 'title', layout: 'title', headline: 'T' },
+      { type: 'narrated', layout: 'cta', speech: 'Middle.', headline: 'Mid' },
+      { type: 'narrated', layout: 'bullets', speech: 'Body.', headline: 'B' },
+      { type: 'narrated', layout: 'cta', speech: 'Download it today.', headline: 'Get started' },
+    ] }, opts);
+    assert.deepEqual(p.scenes.map(s => `${s.type}:${s.layout}`), ['title:title', 'narrated:bullets', 'narrated:bullets', 'outro:cta']);
+    assert.equal(p.scenes.at(-1).speech, 'Download it today.');
+  });
+});
+
+describe('askQuestions', async () => {
+  const { askQuestions, DEFAULT_QUESTIONS } = await import('../src/agents/explainer/planner.js');
+  it('retries, then falls back to default questions rather than skipping', async () => {
+    let n = 0;
+    const res = await askQuestions({ endpoint: 'e', model: 'm' }, { brief: 'x', format: 'explainer', targetSeconds: 45 }, { completeFn: async () => { n++; return 'garbage'; } });
+    assert.equal(n, 2);
+    assert.deepEqual(res.questions, DEFAULT_QUESTIONS);
+  });
+});
+
+describe('splitQuestions', async () => {
+  const { splitQuestions } = await import('../src/agents/explainer/planner.js');
+  it('splits packed questions, keeping bracketed defaults', () => {
+    assert.deepEqual(splitQuestions(['Who is it for? [small businesses] What matters most? [AI content] Presenter or not?', 'Tone?']),
+      ['Who is it for? [small businesses]', 'What matters most? [AI content]', 'Presenter or not?', 'Tone?']);
   });
 });

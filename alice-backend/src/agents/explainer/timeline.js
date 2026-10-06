@@ -66,6 +66,48 @@ export function layoutTimeline(scenes, assets) {
 }
 
 /**
+ * Caption words = the SCRIPT's words (exact spelling of names), timed by
+ * whisper. ASR misspells brand names ("TheiaCast" → "TheaCast",
+ * "ThayerCast"), so its text is only used to align: LCS over normalized
+ * tokens maps script words to recognised words; unmatched script words are
+ * interpolated between matched neighbours. With no transcript, words are
+ * spread evenly over `duration` (used by the draft animatic).
+ */
+export function alignScriptWords(script, asrWords = [], duration = 0) {
+  const tokens = String(script ?? '').split(/\s+/).filter(Boolean);
+  if (!tokens.length) return [];
+  const norm = (w) => w.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!asrWords.length) {
+    const step = (duration || tokens.length * 0.4) / tokens.length;
+    return tokens.map((text, i) => ({ text, start: r2(i * step), end: r2((i + 1) * step - 0.02) }));
+  }
+  const a = tokens.map(norm), b = asrWords.map(w => norm(w.text));
+  const n = a.length, m = b.length;
+  const dp = Array.from({ length: n + 1 }, () => new Int16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) {
+    dp[i][j] = a[i] && a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  }
+  const match = new Array(n).fill(-1);
+  for (let i = 0, j = 0; i < n && j < m;) {
+    if (a[i] && a[i] === b[j]) { match[i++] = j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) i++;
+    else j++;
+  }
+  const first = asrWords[0].start, last = asrWords.at(-1).end;
+  const out = tokens.map((text, i) => (match[i] >= 0 ? { text, start: asrWords[match[i]].start, end: asrWords[match[i]].end } : { text, start: null, end: null }));
+  for (let i = 0; i < n; i++) {
+    if (out[i].start !== null) continue;
+    let k = i; while (k < n && out[k].start === null) k++;
+    const from = i > 0 ? out[i - 1].end : first;
+    const to = k < n ? out[k].start : last;
+    const step = Math.max(0.05, (to - from) / (k - i));
+    for (let q = i; q < k; q++) { out[q].start = r2(from + (q - i) * step); out[q].end = r2(from + (q - i + 1) * step - 0.02); }
+    i = k - 1;
+  }
+  return out;
+}
+
+/**
  * Group word timings into caption chunks (scene-local seconds in, absolute out).
  * Breaks on CAPTION_MAX_WORDS, a pause > CAPTION_GAP, or sentence end.
  */
@@ -93,9 +135,9 @@ export function captionChunks(words, offset, sceneEnd) {
  * checks. Same file contract as LLM output: <template>, root id = compId,
  * one paused timeline at window.__timelines[compId].
  */
-export function fallbackSceneHtml(compId, scene, { palette, font, duration, words }) {
+export function fallbackSceneHtml(compId, scene, { palette, font, duration, words, mediaFile, logoFile }) {
   const canvas = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
-  return buildLayoutHtml(compId, scene, { palette, font, duration, words, canvas });
+  return buildLayoutHtml(compId, scene, { palette, font, duration, words, canvas, mediaFile, logoFile });
 }
 
 function backgroundHtml(i, scene, slot, a, palette) {
@@ -111,9 +153,10 @@ function backgroundHtml(i, scene, slot, a, palette) {
  * Build the root index.html.
  * @param {object} plan     normalized plan
  * @param {object[]} assets per scene: { voiceFile, voiceDur, clipFile, clipDur, imageFile, sfxFile, words }
- * @param {{musicFile?: string}} global
+ * @param {{musicFile?: string, portraitFile?: string}} global
+ *   portraitFile is only used by the draft animatic's presenter placeholder.
  */
-export function buildIndexHtml(plan, assets, { musicFile } = {}) {
+export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
   const slots = layoutTimeline(plan.scenes, assets);
   const total = r2(slots.at(-1).start + slots.at(-1).duration);
   const parts = [];
@@ -129,6 +172,12 @@ export function buildIndexHtml(plan, assets, { musicFile } = {}) {
     }
     if (scene.type === 'presenter' && a.clipFile) {
       parts.push(`<video id="presenter-${i}" class="clip presenter" src="${esc(a.clipFile)}" playsinline data-has-audio="true" data-volume="1" data-start="${slot.start}" data-duration="${slot.duration}" data-track-index="1"></video>`);
+    } else if (scene.type === 'presenter') {
+      // Draft animatic: presenter clip not generated yet.
+      const inner = portraitFile
+        ? `<img id="pph-img-${i}" src="${esc(portraitFile)}" alt="" />`
+        : `<div class="pph-card"><div class="pph-head"></div><div class="pph-body"></div><div class="pph-label"><div class="pph-tag">PRESENTER</div><div>${esc(plan.presenter?.description ?? '').slice(0, 140)}</div></div></div>`;
+      parts.push(`<div id="presenter-${i}" class="clip presenter pph" data-start="${slot.start}" data-duration="${slot.duration}" data-track-index="1">${inner}</div>`);
     }
     const area = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
     parts.push(`<div id="g-${i}" class="gfx" style="left: ${area.x}px; top: ${area.y}px; width: ${area.width}px; height: ${area.height}px;" data-composition-id="scene-${i}" data-composition-src="compositions/scene-${i}.html" data-start="${slot.start}" data-duration="${slot.duration}" data-track-index="2" data-width="${area.width}" data-height="${area.height}"></div>`);
@@ -169,6 +218,13 @@ export function buildIndexHtml(plan, assets, { musicFile } = {}) {
   .presenter { position: absolute; right: ${PRESENTER_BOX.right}px; top: ${PRESENTER_BOX.top}px; width: ${PRESENTER_BOX.width}px; height: ${PRESENTER_BOX.height}px;
     object-fit: cover; border-radius: 28px; box-shadow: 0 30px 80px rgba(0,0,0,0.55); border: 3px solid ${palette.accent}55; }
   .gfx { position: absolute; overflow: hidden; }
+  .pph { overflow: hidden; background: #20242e; }
+  .pph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .pph-card { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #9aa3b5; }
+  .pph-head { width: 150px; height: 150px; border-radius: 50%; background: #3a4150; }
+  .pph-body { width: 300px; height: 130px; border-radius: 150px 150px 0 0; background: #3a4150; margin-top: 14px; }
+  .pph-tag { font-weight: 800; letter-spacing: 0.2em; margin-bottom: 8px; color: #c9d1e3; }
+  .pph-label { margin-top: 22px; font-size: 24px; text-align: center; max-width: 820px; line-height: 1.35; letter-spacing: 0.02em; }
   .caption { position: absolute; left: 0; right: 0; bottom: ${CAPTION_BAND.bottom}px; display: flex; justify-content: center; }
   .caption span { background: rgba(0,0,0,0.62); color: #ffffff; font-size: 44px; font-weight: 600; padding: 12px 28px; border-radius: 14px; }
 </style>

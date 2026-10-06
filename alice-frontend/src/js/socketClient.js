@@ -123,7 +123,7 @@ export class SocketClient {
     }
   }
 
-  sendMessage(agent, content, history = [], conversationId = null, imageData = null, lastFrameData = null, videoMode = null, references = null, videoModel = null, lyrics = null, musicSeconds = null, chainImagesData = null, imageModel = null, imageAspect = null, upscale4k = false, sfxSeconds = null, explainerOptions = null) {
+  sendMessage(agent, content, history = [], conversationId = null, imageData = null, lastFrameData = null, videoMode = null, references = null, videoModel = null, lyrics = null, musicSeconds = null, chainImagesData = null, imageModel = null, imageAspect = null, upscale4k = false, sfxSeconds = null, explainerOptions = null, explainerImages = null) {
     if (!this.socket || !this.connected) {
       throw new Error('Not connected to backend.');
     }
@@ -142,6 +142,7 @@ export class SocketClient {
     if (sfxSeconds) payload.sfxSeconds = sfxSeconds;
     // ExplainerAgent: format / length / presenter scenes / creative mode.
     if (explainerOptions) payload.explainerOptions = explainerOptions;
+    if (explainerImages) payload.explainerImages = explainerImages;
     // VideoAgent chain mode: all attached reference images, matched by name
     // against each script chunk's own "Image: <filename>" line.
     if (chainImagesData) payload.chainImagesData = chainImagesData;

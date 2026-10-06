@@ -437,8 +437,20 @@ offline, `404` unknown/expired `job_id`.
 ## Explainer / promo video — `POST /agent/explainer` (2026-10-05)
 
 Turns a brief into a finished explainer or product-promo MP4, end to end on
-local models — the same pipeline as the web UI's 🎞️ Explainer agent.
-Source: `src/agents/explainer/`.
+local models. Source: `src/agents/explainer/`.
+
+This endpoint is **one-shot** (brief in, video out). The web UI's 🎞️
+Explainer agent runs the same pipeline **conversationally**
+(`session.js`): it reads the brief's links, looks at attached images, asks
+a few questions, then shows a storyboard table plus a ~1 min draft
+**animatic** (real voiceover/layouts/attachments; presenter and AI
+backgrounds as placeholders) and only renders the full video once you reply
+**approve**. Further feedback revises the storyboard; unchanged media is
+reused.
+
+Any `http(s)` links in the brief are fetched (plus up to 3 same-site
+product pages — features/about/pricing…) and given to the planner as source
+material; private/loopback addresses are refused.
 
 | Step | What runs |
 |---|---|
@@ -446,7 +458,7 @@ Source: `src/agents/explainer/`.
 | voice | Kokoro reads every line — real durations drive the whole timeline |
 | media | one ComfyUI session: Krea 2 presenter portrait + backgrounds, LTX-2.3 ID-LoRA presenter clips, ACE-Step music bed, Stable Audio 3 transition sfx |
 | captions | whisper word timings from the audio that actually plays |
-| compose | HyperFrames composition: timeline, media, captions and audio mix built in code; each scene's graphics from a layout library (`bullets`, `stat`, `steps`, `compare`, `statement`, `title`, `cta`) |
+| compose | HyperFrames composition: timeline, media, captions and audio mix built in code; each scene's graphics from a layout library (`bullets`, `stat`, `steps`, `compare`, `statement`, `showcase`, `title`, `cta`). Captions use the script's exact words (so product names are spelled right), timed by whisper |
 | render | `hyperframes check` + `hyperframes render` → 1920×1080 MP4 |
 
 Every media step is best-effort: a failed presenter clip turns that scene
@@ -473,6 +485,7 @@ falls back to a gradient, missing music/sfx are skipped — reported in
 | `targetSeconds` | number | `45` | 15–120 (approximate — real length comes from the voiceover) |
 | `creative` | boolean | `false` | let the LLM write each scene's graphics as free-form HyperFrames HTML, gated by `hyperframes check`; any scene that fails falls back to its layout. Slower and less predictable |
 | `voice` | string | auto | Kokoro voice id (e.g. `bf_alice`, `bm_george`); default is picked from the presenter description |
+| `images` | `[{name, dataUrl}]` | `[]` | up to 8 png/jpeg/webp/gif (≤10MB each). The vision model classifies each as logo / screenshot / photo: the logo goes on the title + CTA cards, screenshots/photos are shown in "showcase" scenes (browser-frame, beside the headline) instead of AI backgrounds |
 
 `POST` → `202 { job_id, status_url: "/agent/explainer/<id>" }`. While
 running, `GET` returns `{ "status": "processing", "progress": "<latest step>", "log": [...] }`.

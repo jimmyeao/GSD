@@ -10,7 +10,8 @@ import { streamCompletion, complete, LLMUnavailableError } from './agents/llmCli
 import { generateImage } from './agents/comfyClient.js';
 import { generateVideo, generateI2V, generateFL2V, generateRef2V, composeRef2VAPrompt, estimateDurationFromScript, looksLikeH3Script, looksLikeLTXScript, generateLTXVideo, generateLTXI2V, generateLTXFL2V, parseScriptChunks, generateChainedVideo } from './agents/videoClient.js';
 import { generateMusic, generateSfx } from './agents/musicClient.js';
-import { runExplainerPipeline, validateExplainerOptions } from './agents/explainer/pipeline.js';
+import { validateExplainerOptions } from './agents/explainer/pipeline.js';
+import { handleExplainerTurn } from './agents/explainer/session.js';
 import { ensureComfyRunning, freeComfyMemory } from './comfyManager.js';
 import { routeByKeyword, routeWithLLM } from './router.js';
 import { buildPptx, parseSlideResponse } from './agents/slideBuilder.js';
@@ -33,7 +34,6 @@ import agentRoutes from './routes/agent.js';
 import openaiRoutes from './routes/openai.js';
 import { isTokenKeyValid } from './mail/tokens.js';
 import { mkdirSync, writeFileSync, unlinkSync, readFileSync, readdirSync, statSync, renameSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 
 const app = express();
@@ -209,7 +209,7 @@ io.use(socketAuth);
 io.on('connection', (socket) => {
   console.log(`[ws] connected: ${socket.id} (user: ${socket.user.username})`);
 
-  socket.on('message', async ({ agent: requestedAgent, content, history = [], conversationId, imageData, lastFrameData, videoMode, videoModel, imageModel, imageAspect, upscale4k, references, lyrics, musicSeconds, sfxSeconds, explainerOptions, chainImagesData }) => {
+  socket.on('message', async ({ agent: requestedAgent, content, history = [], conversationId, imageData, lastFrameData, videoMode, videoModel, imageModel, imageAspect, upscale4k, references, lyrics, musicSeconds, sfxSeconds, explainerOptions, explainerImages, chainImagesData }) => {
     if (!content?.trim()) return;
 
     let agentId = requestedAgent;
@@ -273,7 +273,7 @@ io.on('connection', (socket) => {
 
     // ── ExplainerAgent (HyperFrames pipeline) ──────────────────────
     if (agentId === 'ExplainerAgent') {
-      await handleExplainerAgent(socket, content, convId, explainerOptions);
+      await handleExplainerAgent(socket, content, convId, explainerOptions, explainerImages);
       return;
     }
 
@@ -1699,32 +1699,34 @@ async function handleMusicAgent(socket, prompt, convId, lyrics, seconds) {
   }
 }
 
-async function handleExplainerAgent(socket, prompt, convId, explainerOptions) {
-  const { opts, error } = validateExplainerOptions({ ...(explainerOptions ?? {}), brief: prompt });
+async function handleExplainerAgent(socket, prompt, convId, explainerOptions, explainerImages) {
+  // Options are only used on a conversation's first turn (they set up the
+  // session); later turns are answers / feedback / "approve".
+  const { opts, error } = validateExplainerOptions({ ...(explainerOptions ?? {}), brief: prompt.trim().length >= 10 ? prompt : 'placeholder brief', images: explainerImages });
   if (error) {
     socket.emit('error', { message: `ExplainerAgent: ${error}` });
     return;
   }
   let fullResponse = '';
   const say = (text) => { socket.emit('token', { token: text }); fullResponse += text; };
-  const id = randomUUID();
   try {
-    const withPresenter = opts.presenter && opts.maxPresenterScenes > 0;
-    say(`Building a ~${opts.targetSeconds}s ${opts.format}${withPresenter ? ` with up to ${opts.maxPresenterScenes} presenter scene(s) — each takes ~6 min, so expect 10-25 minutes` : ' — expect about 4-6 minutes'}.\n\n`);
-    const out = await runExplainerPipeline(id, opts, (msg) => say(`> ${msg}\n`));
-    const filename = `explainer_${id.slice(0, 8)}.mp4`;
-    const assetId = saveAsset(socket.user.id, convId, 'video', filename, readFileSync(out.file), out.plan.title.slice(0, 80));
-    const videoUrl = assetUrl(socket, assetId);
-    const warn = out.warnings.length ? `\n\n_Notes: ${out.warnings.join('; ')}_` : '';
-    say(`\n**${out.plan.title}** is ready.${warn}\n\n[Download video](${videoUrl})\n\n<video controls width="640" src="${videoUrl}"></video>`);
+    await handleExplainerTurn({ convId, message: prompt, images: opts.images, opts }, {
+      say: (md) => say(`${md}\n`),
+      progress: (msg) => say(`> ${msg}\n`),
+      saveVideo: async (file, title) => {
+        const filename = `${title.startsWith('Storyboard') ? 'storyboard' : 'explainer'}_${convId}_${Date.now()}.mp4`;
+        const assetId = saveAsset(socket.user.id, convId, 'video', filename, readFileSync(file), title.slice(0, 80));
+        return assetUrl(socket, assetId);
+      },
+    });
     if (convId) {
       stmts.insertMessage.run(convId, 'assistant', 'ExplainerAgent', fullResponse);
       stmts.touchConversation.run(convId);
     }
     socket.emit('done', { agent: 'ExplainerAgent' });
-    console.log(`[ExplainerAgent] ${id} → ${out.file}`);
   } catch (err) {
     console.error('[ExplainerAgent] error:', err);
+    if (convId && fullResponse) stmts.insertMessage.run(convId, 'assistant', 'ExplainerAgent', fullResponse);
     socket.emit('error', { message: `ExplainerAgent error: ${err.message}` });
   }
 }
