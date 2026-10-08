@@ -21,13 +21,15 @@ import { homedir } from 'node:os';
 
 const HOME = homedir();
 export const HYPERFRAMES_HOME = process.env.HYPERFRAMES_HOME ?? join(HOME, '.local/share/alice-hyperframes');
-const NODE22 = process.env.HYPERFRAMES_NODE ?? join(HOME, '.local/share/fnm/node-versions/v22.23.3/installation/bin/node');
+export const NODE22 = process.env.HYPERFRAMES_NODE ?? join(HOME, '.local/share/fnm/node-versions/v22.23.3/installation/bin/node');
 const CLI = join(HYPERFRAMES_HOME, 'node_modules/hyperframes/bin/hyperframes.mjs');
+/** argv prefix for spawning the CLI with NODE22 (used by studio.js). */
+export const HYPERFRAMES_CLI_ARGS = [CLI];
 const LOCAL_BIN = join(HOME, '.local/bin');
 export const FFPROBE = process.env.FFPROBE_BIN ?? join(LOCAL_BIN, 'ffprobe');
 export const GSAP_JS = join(HYPERFRAMES_HOME, 'node_modules/gsap/dist/gsap.min.js');
 
-function cliEnv() {
+export function hyperframesEnv() {
   return {
     ...process.env,
     PATH: `${LOCAL_BIN}:${process.env.PATH}`,
@@ -40,7 +42,7 @@ function cliEnv() {
 
 function run(bin, args, { cwd, timeoutMs = 600_000 } = {}) {
   return new Promise((resolve) => {
-    execFile(bin, args, { cwd, env: cliEnv(), timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(bin, args, { cwd, env: hyperframesEnv(), timeout: timeoutMs, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
       resolve({ code: err ? (err.code ?? 1) : 0, stdout: String(stdout), stderr: String(stderr), killed: !!err?.killed });
     });
   });
@@ -84,6 +86,7 @@ export async function lintProject(dir) {
  * Studio-ergonomics warnings and info-level notes are dropped.
  */
 const ACTIONABLE_WARNINGS = new Set(['console_warning', 'console_error', 'gsap_css_transform_conflict']);
+const SCENE_LAYOUT_DEFECTS = new Set(['text_box_overflow', 'text_occluded', 'container_overflow', 'text_clipped', 'text_offscreen', 'content_offscreen']);
 export async function checkProject(dir) {
   const { stdout, stderr } = await hf(['check', '--json'], { cwd: dir, timeoutMs: 300_000 });
   let report;
@@ -95,7 +98,14 @@ export async function checkProject(dir) {
   const out = [];
   for (const stage of ['lint', 'runtime', 'layout', 'contrast', 'motion']) {
     for (const f of report[stage]?.findings ?? []) {
-      if (f.severity !== 'error' && !(f.severity === 'warning' && ACTIONABLE_WARNINGS.has(f.code))) continue;
+      const sceneFile = /compositions\/[\w-]+\.html$/.test(f.sourceFile ?? f.file ?? '');
+      const actionable = f.severity === 'error'
+        || (f.severity === 'warning' && ACTIONABLE_WARNINGS.has(f.code))
+        // Text spilling out of / hidden inside scene graphics is reported only
+        // as "info", but it's a visible defect. (Not on index.html, where the
+        // Ken Burns background zoom overflows its clip box on purpose.)
+        || (sceneFile && SCENE_LAYOUT_DEFECTS.has(f.code));
+      if (!actionable) continue;
       out.push({
         stage, severity: f.severity, code: f.code, message: f.message, fixHint: f.fixHint,
         sourceFile: f.sourceFile ?? f.file ?? '', time: f.firstSeen ?? f.time, text: f.text,

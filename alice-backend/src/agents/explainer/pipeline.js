@@ -22,7 +22,7 @@ import { join, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config } from '../../config.js';
 import { ensureComfyRunning, freeComfyMemory } from '../../comfyManager.js';
-import { LLMUnavailableError } from '../llmClient.js';
+import { LLMUnavailableError, complete } from '../llmClient.js';
 import { planExplainer } from './planner.js';
 import { voicePhase, comfyPhase } from './assets.js';
 import { layoutTimeline, buildIndexHtml, fallbackSceneHtml, alignScriptWords } from './timeline.js';
@@ -145,6 +145,11 @@ const logoOf = (ctx) => ctx.images?.find(i => i.kind === 'logo')?.file;
 
 function writeComposition(dir, plan, assets, { musicFile, portraitFile, logoFile }) {
   const slots = layoutTimeline(plan.scenes, assets);
+  // Project metadata HyperFrames Studio shows (name) and uses (asset paths).
+  writeFileSync(join(dir, 'meta.json'), JSON.stringify({ id: dir.split('/').pop(), name: plan.title }, null, 2));
+  if (!existsSync(join(dir, 'hyperframes.json'))) {
+    writeFileSync(join(dir, 'hyperframes.json'), JSON.stringify({ paths: { blocks: 'compositions', components: 'compositions/components', assets: 'assets' }, media: { autoProxy: true } }, null, 2));
+  }
   writeFileSync(join(dir, 'index.html'), buildIndexHtml(plan, assets, { musicFile, portraitFile }));
   plan.scenes.forEach((scene, i) => {
     writeFileSync(join(dir, 'compositions', `scene-${i}.html`), fallbackSceneHtml(`scene-${i}`, scene, {
@@ -209,6 +214,13 @@ export async function produceVideo(dir, plan, ctx, { voice, seed, creative = fal
   const slots = writeComposition(dir, plan, assets, { musicFile: media.musicFile, logoFile: logoOf(ctx) });
   let scenes = plan.scenes.map((_, i) => ({ index: i, source: 'layout', rounds: 0 }));
   if (creative) {
+    // ComfyUI just finished, so vllm-laguna is still restarting — wait for a
+    // real answer first, or every scene's first attempt fails at once.
+    onProgress('Waiting for the LLM to write scene graphics…');
+    await withLLM(async () => {
+      const llm = explainerLLM();
+      await complete(llm.endpoint, llm.model, [{ role: 'user', content: 'Reply with OK.' }], { numPredict: 200, signal: AbortSignal.timeout(60_000) });
+    }, { onProgress });
     const sceneInfo = slots.map((s, i) => ({ duration: s.duration, words: assets[i].words ?? [] }));
     scenes = await withLLM(() => writeScenes(dir, plan, sceneInfo, { llm: explainerLLM(), check: checkProject, slots, onProgress }), { onProgress });
     scenes = scenes.map(s => ({ ...s, source: s.source === 'fallback' ? 'layout' : 'llm' }));

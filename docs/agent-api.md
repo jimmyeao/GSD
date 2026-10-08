@@ -512,6 +512,24 @@ HyperFrames Studio, or re-rendered after editing `plan.json` without
 regenerating any media via `recomposeExplainer(<job_id>)` in
 `src/agents/explainer/pipeline.js` (~25s).
 
+### HyperFrames Studio (web editor)
+
+Finished videos in the web UI's Explainer conversations include an **Open
+in HyperFrames Studio** link: the full HyperFrames editor (timeline, text,
+timing, animation, block catalog) on the video's own project. Reply
+**render my edits** in the conversation to render it exactly as edited;
+storyboard revisions warn before overwriting Studio edits.
+
+Studio runs at its own origin because it uses root-absolute `/api/…` paths:
+`STUDIO_PUBLIC_URL` (default `https://studio.alice.deviousweb.com`), which
+the edge proxy routes to `STUDIO_PORT` (default `5010`) on `STUDIO_HOST`
+(default `HOST`). The backend's proxy there admits only a signed,
+single-use, 10-minute link minted for the conversation's owner, then a
+project-scoped HttpOnly cookie (8h); each project's Studio is started on
+demand on `127.0.0.1:3470-3475` and stopped after 30 min idle. Studio uses
+Server-Sent Events (no WebSockets). `STUDIO_DISABLED=1` turns it off.
+Source: `src/agents/explainer/studio.js`.
+
 ### Server setup (one-off, already done on the GPU box)
 
 HyperFrames needs Node 22+ while Alice runs on Node 20, so it's a separate

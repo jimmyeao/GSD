@@ -1,4 +1,4 @@
 {
-  "_comment": "Spoken respellings for TTS (Kokoro) and generated presenter speech. Key = word as written (case-insensitive, whole word); value = how it should sound, written as a respelling. Captions and on-screen text keep the original spelling. Per-video overrides come from the chat (\"X is pronounced Y\").",
-  "TheiaCast": "Theeahcast"
+  "_comment": "Spoken-only pronunciation fixes. Key = word as written (case-insensitive, whole word). Value = a pronunciation hint like \"thee-ah-cast\" (Kokoro gets it joined, \"Theeahcast\"; the LTX presenter gets \"Thee-ah-cast\"), or {\"tts\": \"...\", \"presenter\": \"...\"} to set each engine explicitly. Captions/on-screen text keep the original spelling. Per-video overrides come from the chat (\"X is pronounced Y\").",
+  "TheiaCast": "thee-ah-cast"
 }

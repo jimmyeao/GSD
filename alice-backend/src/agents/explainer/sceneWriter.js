@@ -32,7 +32,9 @@ Exact file shape (everything inside <template>):
 <body><template>
 <style>
   #root { position: absolute; inset: 0; }   /* style the root by #root, never by class */
-  /* your styles — prefix every id with the composition id */
+  /* your styles: give elements ids like COMP_ID-title, COMP_ID-b1 and select them by
+     those ids (#COMP_ID-title) or by classes. NO element has the id "COMP_ID" itself,
+     so never write selectors like "#COMP_ID .x". */
 </style>
 <div id="root" data-composition-id="COMP_ID" data-width="CANVAS_W" data-height="CANVAS_H">
   <!-- your markup -->
@@ -54,6 +56,8 @@ Hard rules (violations are rejected):
 - Core gsap only: NO plugins (no text: tweens, SplitText, TextPlugin, ScrambleText, MotionPath, DrawSVG, registerPlugin). To animate words, wrap each word in its own <span> and tween the spans. For a counting number, tween a plain object and write Math.round(value) into textContent in onUpdate.
 - Text blocks must never overlap each other: give each block its own position (stack them with flexbox column + gap, or distinct top values).
 - No <br>. Elements you transform must be block or inline-block.
+- No emoji or emoticons anywhere. For icons, draw simple shapes with divs/CSS or inline SVG.
+- Every #id you use in CSS or in gsap selectors must exist on an element in your markup.
 - font-family must be the given font (plus a generic fallback). No other named fonts.
 - Background stays transparent (the video/image underneath must show through).
 - Keep everything inside the CANVAS_W x CANVAS_H canvas; text must wrap within it (set max-width), never overflow.
@@ -114,6 +118,21 @@ export function staticCheck(html, compId, font, scene = null) {
   if (/url\(|https?:\/\//i.test(html)) problems.push('no url() or http(s) links');
   if (/Math\.random|Date\.now|new Date|setTimeout|setInterval|requestAnimationFrame|repeat:\s*-1/.test(html)) problems.push('no Math.random/Date/timers/infinite repeats');
   if (/<br\b/i.test(html)) problems.push('no <br>');
+  if (/\p{Extended_Pictographic}/u.test(html)) problems.push('no emoji — draw icons with CSS shapes or inline SVG');
+  // Selectors pointing at ids that don't exist silently style/animate nothing
+  // (a real scene targeted "#scene-6 .headline" → all text rendered unstyled).
+  const markup = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ');
+  // (?<![\w-]) so data-composition-id="…" doesn't count as an element id
+  const ids = new Set([...markup.matchAll(/(?<![\w-])id=["']([^"']+)["']/g)].map(m => m[1]));
+  const css = (html.match(/<style[\s\S]*?<\/style>/gi) ?? []).join(' ').replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/#[0-9a-f]{3,8}\b(?=\s*[;,)}!\s])/gi, ' ');
+  const js = (html.match(/<script[\s\S]*?<\/script>/gi) ?? []).join(' ');
+  const referenced = new Set([
+    ...[...css.matchAll(/#([A-Za-z_][\w-]*)/g)].map(m => m[1]),
+    ...[...js.matchAll(/["'`]#([A-Za-z_][\w-]*)/g)].map(m => m[1]),
+    ...[...js.matchAll(/getElementById\(\s*["'`]([^"'`]+)["'`]/g)].map(m => m[1]),
+  ]);
+  const missing = [...referenced].filter(id => !ids.has(id));
+  if (missing.length) problems.push(`these ids are used in CSS/JS but no element has them: ${missing.map(m => `#${m}`).join(', ')}${missing.includes(compId) ? ` — nothing has id "${compId}"; style elements by their own ids or classes` : ''}`);
   if (/<script[^>]+src=/i.test(html)) problems.push('no external scripts');
   if (/registerPlugin|SplitText|TextPlugin|ScrambleText|MotionPath|DrawSVG|MorphSVG|\btext\s*:\s*["'`{]/.test(html)) problems.push('no gsap plugins (no text: tweens) — wrap words in spans, or tween a plain object and set textContent in onUpdate');
   for (const m of html.matchAll(/font-family\s*:\s*([^;}"]*(?:"[^"]*"[^;}"]*)*)/gi)) {
@@ -195,7 +214,12 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
     for (const s of pending) {
       if (s.problems.length) {
         writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
-        if (!s.llmError) {
+        if (s.llmError) {
+          // Transient LLM failure (e.g. still restarting after ComfyUI) —
+          // ask again next round with the same messages, not a fix request.
+          delete s.llmError;
+          next.push(s);
+        } else {
           s.messages.push({ role: 'user', content: fixMessage(s.problems) });
           next.push(s);
         }

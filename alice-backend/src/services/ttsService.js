@@ -2,7 +2,7 @@
  * TTS service — proxies to the persistent Kokoro TTS server.
  * Falls back to Piper CLI if Kokoro server is unavailable.
  */
-import { loadLexicon, applyPronunciations } from '../agents/explainer/pronounce.js';
+import { loadLexicon, lexiconFor, applyPronunciations } from '../agents/explainer/pronounce.js';
 
 const KOKORO_URL = process.env.KOKORO_URL || 'http://localhost:5100';
 const KOKORO_VOICE = process.env.KOKORO_VOICE || 'bf_alice';
@@ -17,7 +17,7 @@ export async function textToSpeech(text, opts = {}) {
   // Shared pronunciation respellings (config/pronunciations.json), e.g.
   // TheiaCast → "Theeahcast". Idempotent, so callers that already applied a
   // larger lexicon (the explainer pipeline) are unaffected.
-  const clean = applyPronunciations(cleanText(text), loadLexicon());
+  const clean = applyPronunciations(cleanText(text), lexiconFor(loadLexicon(), 'tts'));
   if (!clean) return Buffer.alloc(0);
 
   const res = await fetch(KOKORO_URL, {

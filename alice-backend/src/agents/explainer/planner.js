@@ -198,7 +198,8 @@ function normalizeCompare(c) {
   return out.left.length && out.right.length ? out : null;
 }
 
-const str = (v, max = 400) => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, max) : '');
+// Emoji render as tiny inconsistent glyphs in the video — strip them from all planned text.
+const str = (v, max = 400) => (typeof v === 'string' ? v.replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, '').replace(/\s+/g, ' ').trim().slice(0, max) : '');
 
 function clampWords(s, max) {
   const words = s.split(' ').filter(Boolean);

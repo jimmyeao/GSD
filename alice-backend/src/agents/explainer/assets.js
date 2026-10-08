@@ -31,7 +31,7 @@ import { generateImage } from '../comfyClient.js';
 import { generateTalkingHead } from '../talkingHeadClient.js';
 import { generateMusic, generateSfx } from '../musicClient.js';
 import { probeDuration } from './hyperframesCli.js';
-import { loadLexicon, applyPronunciations } from './pronounce.js';
+import { loadLexicon, lexiconFor, applyPronunciations } from './pronounce.js';
 
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'data');
 const VOICE_SAMPLE_TEXT = 'This is a short sample of my natural speaking voice, recorded for reference.';
@@ -83,6 +83,8 @@ function dropCache(kind, filename) {
 export async function voicePhase(dir, plan, { voice, images = [], onProgress = () => {} }) {
   const chosen = voice || pickVoice(plan.presenter?.description);
   const lexicon = loadLexicon(plan.pronunciations);
+  const ttsLex = lexiconFor(lexicon, 'tts');
+  const presenterLex = lexiconFor(lexicon, 'presenter');
   const assets = plan.scenes.map(() => ({}));
   onProgress(`Recording voiceover (${chosen})…`);
   for (const [i, scene] of plan.scenes.entries()) {
@@ -90,7 +92,8 @@ export async function voicePhase(dir, plan, { voice, images = [], onProgress = (
     if (scene.media) a.mediaFile = images.find(img => img.id === scene.media)?.file;
     if (!scene.speech) continue;
     // Audio uses the respelled line; captions/on-screen text keep scene.speech.
-    a.spoken = applyPronunciations(scene.speech, lexicon);
+    a.spoken = applyPronunciations(scene.speech, ttsLex);
+    if (scene.type === 'presenter') a.presenterSpoken = applyPronunciations(scene.speech, presenterLex);
     const rel = `assets/tts-${assetKey(chosen, a.spoken)}.wav`;
     if (!existsSync(join(dir, rel))) writeFileSync(join(dir, rel), await textToSpeech(a.spoken, { voice: chosen }));
     a.ttsFile = rel;
@@ -164,13 +167,13 @@ export async function comfyPhase(dir, plan, assets, { endpoint, voiceRefFile, mu
     const live = presenterIdx();
     for (const [k, i] of live.entries()) {
       const scene = plan.scenes[i];
-      const rel = `assets/presenter-${assetKey(assets[i].spoken, plan.presenter.description, assets[i].clipSeconds, seed, voiceRefFile)}.mp4`;
+      const rel = `assets/presenter-${assetKey(assets[i].presenterSpoken, plan.presenter.description, assets[i].clipSeconds, seed, voiceRefFile)}.mp4`;
       onProgress(existsSync(join(dir, rel)) ? `Presenter clip ${k + 1}/${live.length} (unchanged, reused)` : `Presenter clip ${k + 1}/${live.length} (${assets[i].clipSeconds}s, ~6 min)…`);
       try {
         assets[i].clipFile = await cached(dir, rel, async () => {
           const out = await generateTalkingHead(endpoint, {
             portrait, voiceRef, visual: presenterVisual(plan.presenter.description),
-            speech: assets[i].spoken, sounds: PRESENTER_SOUNDS, seconds: assets[i].clipSeconds, seed,
+            speech: assets[i].presenterSpoken, sounds: PRESENTER_SOUNDS, seconds: assets[i].clipSeconds, seed,
           });
           const buf = await fetchComfyOutput(endpoint, out);
           dropCache('videos', out.filename);

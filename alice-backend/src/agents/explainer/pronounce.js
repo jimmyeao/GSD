@@ -6,6 +6,15 @@
  * fixes it: "Theeahcast" → θˈiːɑːkˌast ("thee-ah-cast"). Respellings apply to
  * the audio only; captions and on-screen text keep the real spelling.
  *
+ * The two speech engines need DIFFERENT respellings:
+ *   tts        Kokoro phonemizes text: hyphenated "Thee-ah-cast" reads the
+ *              first syllable like "the" (ð), so syllables are joined →
+ *              "Theeahcast".
+ *   presenter  LTX-2.3 reads more like a person: it said "Theeahcast" as
+ *              "thee-you-cast", so it gets the hyphenated hint "Thee-ah-cast".
+ * Entries are either a plain hint ("thee-ah-cast" — both forms derived from
+ * it) or explicit { "tts": "...", "presenter": "..." }.
+ *
  * Sources, merged (later wins): config/pronunciations.json (shared) → the
  * plan's own `pronunciations` (from the client's chat feedback).
  */
@@ -29,15 +38,37 @@ export function normalizeRespelling(hint) {
   return joined.charAt(0).toUpperCase() + joined.slice(1).toLowerCase();
 }
 
-/** Keep only sane {word: respelling} string pairs. */
+/** Presenter (LTX) form: keep syllable breaks, hyphenated, capitalised. */
+export function presenterRespelling(hint) {
+  const s = String(hint ?? '').trim().replace(/^["'“”]+|["'“”]+$/g, '');
+  if (!s || s.length > 60 || /[<>{}]/.test(s)) return '';
+  const hyph = s.replace(/\s+/g, '-').toLowerCase();
+  return hyph.charAt(0).toUpperCase() + hyph.slice(1);
+}
+
+/** Keep only sane entries. Plain hints are kept as given (raw form). */
 export function cleanLexicon(raw) {
   const out = {};
   if (!raw || typeof raw !== 'object') return out;
   for (const [word, hint] of Object.entries(raw)) {
-    if (word.startsWith('_') || typeof hint !== 'string') continue;
     const w = word.trim();
-    const r = normalizeRespelling(hint);
-    if (w && r && w.length <= 60 && Object.keys(out).length < MAX_ENTRIES) out[w] = r;
+    if (!w || w.startsWith('_') || w.length > 60 || Object.keys(out).length >= MAX_ENTRIES) continue;
+    if (typeof hint === 'string' && normalizeRespelling(hint)) out[w] = hint.trim();
+    else if (hint && typeof hint === 'object' && (typeof hint.tts === 'string' || typeof hint.presenter === 'string')) {
+      out[w] = { ...(typeof hint.tts === 'string' ? { tts: hint.tts.trim() } : {}), ...(typeof hint.presenter === 'string' ? { presenter: hint.presenter.trim() } : {}) };
+    }
+  }
+  return out;
+}
+
+/** The respelling map for one engine ('tts' | 'presenter'). */
+export function lexiconFor(lexicon, engine) {
+  const out = {};
+  for (const [w, v] of Object.entries(lexicon)) {
+    const r = typeof v === 'string'
+      ? (engine === 'presenter' ? presenterRespelling(v) : normalizeRespelling(v))
+      : (v[engine] ?? '');
+    if (r) out[w] = r;
   }
   return out;
 }

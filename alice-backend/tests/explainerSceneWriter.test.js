@@ -98,3 +98,18 @@ describe('writeScenes', () => {
     assert.match(fixPrompt, /content_overlap/);
   });
 });
+
+describe('staticCheck catches silent no-op selectors and emoji', () => {
+  it('flags #ids used in CSS/JS that no element has (the "#scene-6 .headline" bug)', () => {
+    const html = good('scene-6').replace('#root{position:absolute;inset:0;', '#root{position:absolute;inset:0;}#scene-6 .x{color:#fff;}#root{');
+    const p = staticCheck(html, 'scene-6', 'Inter').join();
+    assert.match(p, /#scene-6/);
+    assert.match(p, /nothing has id "scene-6"/);
+  });
+  it('does not mistake hex colours for ids', () => {
+    assert.deepEqual(staticCheck(good('scene-1').replace('#root{', '#root{color:#ffffff;background:#0b1020;'), 'scene-1', 'Inter'), []);
+  });
+  it('rejects emoji', () => {
+    assert.match(staticCheck(good('scene-1', 'Hi 😊'), 'scene-1', 'Inter').join(), /emoji/);
+  });
+});

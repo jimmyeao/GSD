@@ -299,6 +299,7 @@ const stmts = {
     'SELECT id, title, agent_id, created_at, updated_at FROM conversations WHERE user_id = ? ORDER BY updated_at DESC LIMIT 50'
   ),
   getConversation: db.prepare('SELECT * FROM conversations WHERE id = ? AND user_id = ?'),
+  listConversationAssets: db.prepare('SELECT filename FROM assets WHERE conversation_id = ? ORDER BY id DESC'),
   insertConversation: db.prepare(
     'INSERT INTO conversations (user_id, title, agent_id) VALUES (?, ?, ?)'
   ),

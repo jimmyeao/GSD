@@ -158,6 +158,8 @@ let comfyProcess = null;
 let idleTimer = null;
 let isStarting = false;
 let startPromise = null;
+let launchPromise = null; // single-flight pause+launch (see ensureComfyRunning)
+let llmPaused = false;    // set when WE stopped vllm-laguna for ComfyUI
 
 // Concurrency guard for freeComfyMemory (2026-10-05). It used to shut
 // ComfyUI down unconditionally, so ANY job finishing — or erroring, e.g. a
@@ -303,32 +305,27 @@ export async function ensureComfyRunning() {
   activeJobs += 1;
   lastEnsureAt = Date.now();
 
-  // Already running?
-  if (await isRunning()) {
-    return;
+  // Single-flight (2026-10-08): the promise is created synchronously, so
+  // concurrent callers share ONE pause+launch. Previously each caller
+  // awaited pauseLLMBackends() before the "already starting?" check, so
+  // three simultaneous jobs launched ComfyUI three times; the extras died
+  // on the port clash and orphaned the manager's process handle.
+  if (!launchPromise) {
+    launchPromise = (async () => {
+      if (await isRunning()) return;
+      // Free memory for ComfyUI's much larger checkpoints before launching —
+      // see the module header comment for why this stops the LLM backends
+      // rather than using vLLM sleep-mode.
+      await pauseLLMBackends();
+      llmPaused = true;
+      isStarting = true;
+      comfyProcess = launchProcess();
+      await waitForReady();
+      isStarting = false;
+      // Don't start idle timer here — wait until freeComfyMemory() is called after the job
+    })().finally(() => { launchPromise = null; });
   }
-
-  // Free memory for ComfyUI's much larger checkpoints before launching —
-  // see the module header comment for why this stops the LLM backends
-  // rather than using vLLM sleep-mode.
-  await pauseLLMBackends();
-
-  // Already starting? Wait for the existing launch.
-  if (isStarting && startPromise) {
-    await startPromise;
-    return;
-  }
-
-  // Launch
-  isStarting = true;
-  startPromise = (async () => {
-    comfyProcess = launchProcess();
-    await waitForReady();
-    isStarting = false;
-    // Don't start idle timer here — wait until freeComfyMemory() is called after the job
-  })();
-
-  await startPromise;
+  await launchPromise;
 }
 
 /**
@@ -356,8 +353,8 @@ async function comfyQueueBusy() {
 }
 
 async function tryShutdownWhenIdle() {
-  if (!comfyProcess) return;
-  const busy = await comfyQueueBusy();
+  if (launchPromise) return; // a launch is in flight — its job will free later
+  const busy = comfyProcess ? await comfyQueueBusy() : false;
   const callerInFlight = activeJobs > 0 && Date.now() - lastEnsureAt < ACTIVE_JOB_GRACE_MS;
   if (busy || callerInFlight) {
     console.log(`[comfyManager] not shutting down — ${busy ? 'ComfyUI queue busy' : `${activeJobs} job(s) starting`}; rechecking in ${FREE_RECHECK_MS / 1000}s`);
@@ -365,12 +362,42 @@ async function tryShutdownWhenIdle() {
     return;
   }
   activeJobs = 0;
-  shutdownComfy();
-  console.log('[comfyManager] ComfyUI shut down after job');
-  // Fire-and-forget: the image/video result shouldn't wait on the LLM
-  // backends coming back up. resumeLLMBackends() never throws.
-  resumeLLMBackends();
+  if (comfyProcess) {
+    shutdownComfy();
+    console.log('[comfyManager] ComfyUI shut down after job');
+  }
+  // Always bring the LLM back if we paused it — even when the ComfyUI
+  // process already died (2026-10-08: an early "no process → return" here
+  // left vllm-laguna stopped for 4 hours). Fire-and-forget: the image/video
+  // result shouldn't wait on it. resumeLLMBackends() never throws.
+  if (llmPaused) {
+    llmPaused = false;
+    resumeLLMBackends().then(async () => { if (!(await llmContainerRunning())) llmPaused = true; });
+  }
 }
+
+async function llmContainerRunning() {
+  const { stdout } = await runCmd('docker', ['inspect', '-f', '{{.State.Running}}', VLLM_LAGUNA.name]);
+  return String(stdout).trim() === 'true';
+}
+
+// Watchdog: if the LLM is paused but nothing is using ComfyUI (crashed job,
+// leaked activeJobs count, failed resume…), restore it. Never leave Alice's
+// LLM down because of a ComfyUI bookkeeping slip.
+const WATCHDOG_MS = 120_000;
+const WATCHDOG_IDLE_MS = 10 * 60_000;
+setInterval(async () => {
+  if (launchPromise || deferredFreeTimer) return;
+  const stale = Date.now() - lastEnsureAt > WATCHDOG_IDLE_MS;
+  if (llmPaused && (activeJobs === 0 || stale) && !(comfyProcess && await comfyQueueBusy())) {
+    if (activeJobs > 0) console.warn(`[comfyManager] watchdog: ${activeJobs} job(s) never released ComfyUI — treating as leaked`);
+    console.log('[comfyManager] watchdog: LLM paused with ComfyUI idle — restoring');
+    activeJobs = 0;
+    await tryShutdownWhenIdle();
+  }
+  // Deliberately NOT restarting vllm-laguna when we didn't stop it — someone
+  // may have stopped it on purpose.
+}, WATCHDOG_MS).unref();
 
 /**
  * Shut down ComfyUI.

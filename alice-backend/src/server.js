@@ -10,8 +10,9 @@ import { streamCompletion, complete, LLMUnavailableError } from './agents/llmCli
 import { generateImage } from './agents/comfyClient.js';
 import { generateVideo, generateI2V, generateFL2V, generateRef2V, composeRef2VAPrompt, estimateDurationFromScript, looksLikeH3Script, looksLikeLTXScript, generateLTXVideo, generateLTXI2V, generateLTXFL2V, parseScriptChunks, generateChainedVideo } from './agents/videoClient.js';
 import { generateMusic, generateSfx } from './agents/musicClient.js';
-import { validateExplainerOptions } from './agents/explainer/pipeline.js';
+import { validateExplainerOptions, EXPLAINERS_DIR } from './agents/explainer/pipeline.js';
 import { handleExplainerTurn } from './agents/explainer/session.js';
+import { studioLink, startStudioProxy } from './agents/explainer/studio.js';
 import { ensureComfyRunning, freeComfyMemory } from './comfyManager.js';
 import { routeByKeyword, routeWithLLM } from './router.js';
 import { buildPptx, parseSlideResponse } from './agents/slideBuilder.js';
@@ -1713,6 +1714,14 @@ async function handleExplainerAgent(socket, prompt, convId, explainerOptions, ex
     await handleExplainerTurn({ convId, message: prompt, images: opts.images, opts }, {
       say: (md) => say(`${md}\n`),
       progress: (msg) => say(`> ${msg}\n`),
+      studioLink: (projectId) => studioLink(projectId, socket.user.id),
+      // Pre-session explainer runs saved their video as explainer_<8 hex of project uuid>.mp4
+      legacyProject: () => {
+        const row = stmts.listConversationAssets.all(convId).find(a => /^explainer_[0-9a-f]{8}\.mp4$/.test(a.filename));
+        if (!row) return null;
+        const prefix = row.filename.slice(10, 18);
+        return readdirSync(EXPLAINERS_DIR).find(d => d.startsWith(`${prefix}-`) && /^[0-9a-f-]{36}$/.test(d)) ?? null;
+      },
       saveVideo: async (file, title) => {
         const filename = `${title.startsWith('Storyboard') ? 'storyboard' : 'explainer'}_${convId}_${Date.now()}.mp4`;
         const assetId = saveAsset(socket.user.id, convId, 'video', filename, readFileSync(file), title.slice(0, 80));
@@ -2047,6 +2056,15 @@ if (typeof _approvalSweeper.unref === 'function') _approvalSweeper.unref();
 // Default bind is loopback; set HOST=0.0.0.0 (or a specific IP) when NGINX
 // runs on a separate host and needs to reach the backend over the network.
 const bindHost = process.env.HOST || '127.0.0.1';
+// HyperFrames Studio for explainer projects (own origin — see studio.js).
+// Only conversation-backed projects, and only for the conversation's owner.
+if (process.env.STUDIO_DISABLED !== '1') {
+  startStudioProxy((userId, projectId) => {
+    const m = /^conv-(\d+)$/.exec(projectId);
+    return !!m && !!stmts.getConversation.get(Number(m[1]), userId);
+  });
+}
+
 httpServer.listen(config.port, bindHost, () => {
   console.log(`Alice backend listening on http://${bindHost}:${config.port}`);
   console.log(`Public URL:  ${config.publicUrl}`);

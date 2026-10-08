@@ -16,13 +16,18 @@
  *   media is reused (content-hashed assets).
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, statSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { askQuestions, planExplainer, revisePlan } from './planner.js';
-import { projectDir, prepareContext, addImages, makeAnimatic, produceVideo, withLLM, explainerLLM } from './pipeline.js';
-import { assertRuntime } from './hyperframesCli.js';
+import { projectDir, prepareContext, addImages, makeAnimatic, produceVideo, withLLM, explainerLLM, EXPLAINERS_DIR } from './pipeline.js';
+import { assertRuntime, renderProject } from './hyperframesCli.js';
+import { parseStudioPrompt, applyDirectEdit } from './directEdit.js';
+import { layoutTimeline } from './timeline.js';
 
 const APPROVE = /^\s*(approve[d]?|go( ahead)?|render( it)?|looks good|lgtm|yes[,.!]?\s*(render|go|do it|approve)?|ship it|perfect|do it|make it|ok(ay)?[,.!]?\s*(go|render)?)\s*[.!]*\s*$/i;
+const RENDER_EDITS = /\b(render|use|keep) (my |the )?(studio |manual )?edits\b|\brender (the )?studio( version)?\b|\brender (it )?as[- ]is\b/i;
+const OPEN_STUDIO = /^\s*(please\s+)?(open|edit|launch|show)(\s+(it|this|the video))?\s+(in\s+)?(the\s+)?(hyperframes\s+)?studio\s*[.!?]*\s*$|^\s*studio\s*[.!?]*\s*$/i;
+const OVERRIDE_EDITS = /\banyway\b|\bdiscard (my )?edits\b/i;
 const SKIP_QUESTIONS = /^\s*(use (your )?defaults?|go with (your )?defaults?|skip|no questions|just do it)\b/i;
 const locks = new Set();
 
@@ -34,6 +39,42 @@ function load(dir) {
 }
 function save(dir, state) {
   writeFileSync(join(dir, 'state.json'), JSON.stringify(state, null, 2));
+}
+
+/** Newest mtime of the files Studio edits (composition HTML). */
+export function compositionMtime(dir) {
+  const files = [join(dir, 'index.html'), ...readdirSync(join(dir, 'compositions')).filter(f => f.endsWith('.html')).map(f => join(dir, 'compositions', f))];
+  return Math.max(0, ...files.filter(existsSync).map(f => statSync(f).mtimeMs));
+}
+const hasStudioEdits = (dir, state) => !!state.handEdited || (state.composedAt && compositionMtime(dir) > state.composedAt + 2000);
+
+/** Chat commands — these must never be mistaken for a new video brief. */
+const isCommand = (m) => OPEN_STUDIO.test(m) || RENDER_EDITS.test(m) || APPROVE.test(m) || !!parseStudioPrompt(m);
+
+/**
+ * Conversations from before the conversational flow (2026-10-05) rendered
+ * into a random-UUID project and kept no session state. Adopt that project
+ * as this conversation's session so Studio/edits/revisions work there too.
+ * @param {string|null} legacyDirName  data/explainers/<uuid> found via the conversation's asset
+ */
+export function adoptLegacyProject(convId, legacyDirName) {
+  if (!legacyDirName || !/^[0-9a-f-]{36}$/.test(legacyDirName)) return null;
+  const legacy = join(EXPLAINERS_DIR, legacyDirName);
+  if (!existsSync(join(legacy, 'plan.json')) || !existsSync(join(legacy, 'out.mp4'))) return null;
+  const target = join(EXPLAINERS_DIR, `conv-${convId}`);
+  if (existsSync(join(target, 'out.mp4'))) return null;
+  rmSync(target, { recursive: true, force: true }); // only ever a stub (no video) at this point
+  renameSync(legacy, target);
+  const plan = JSON.parse(readFileSync(join(target, 'plan.json'), 'utf8'));
+  for (const s of plan.scenes) { s.media ??= ''; s.layout ??= ''; }
+  const state = {
+    stage: 'done', adoptedFrom: legacyDirName,
+    opts: { format: 'explainer', presenter: plan.scenes.some(s => s.type === 'presenter'), maxPresenterScenes: 3, targetSeconds: 45, creative: false },
+    brief: plan.title, ctx: { brief: plan.title, sourceText: '', sources: [], images: [] },
+    plan, answers: '', seed: Math.floor(Math.random() * 2 ** 31), renders: 1, composedAt: compositionMtime(target),
+  };
+  writeFileSync(join(target, 'state.json'), JSON.stringify(state, null, 2));
+  return state;
 }
 
 const cell = (s) => String(s ?? '').replace(/\|/g, '\\|').replace(/\n/g, ' ').trim() || '—';
@@ -66,7 +107,8 @@ export function storyboardMarkdown(plan, slots, ctx) {
 /**
  * Handle one chat turn for the explainer session in `convId`.
  * @param {object} turn  { convId, message, images: [{name,dataUrl}], opts (validated, first turn only) }
- * @param {object} ui    { say(markdown), progress(msg), saveVideo(file, title) → url }
+ * @param {object} ui    { say(markdown), progress(msg), saveVideo(file, title) → url, studioLink?(projectId) → url,
+ *                         legacyProject?() → old one-shot project dir name for this conversation, or null }
  */
 export async function handleExplainerTurn({ convId, message, images = [], opts }, ui) {
   assertRuntime();
@@ -79,12 +121,22 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
   }
   locks.add(id);
   try {
-    const dir = projectDir(id);
+    let dir = projectDir(id);
     let state = load(dir);
+    // A stub left by a command mistaken for a brief (before this guard existed).
+    if (state?.stage === 'questions' && isCommand(state.brief)) { rmSync(join(dir, 'state.json')); state = null; }
+    if (!state && ui.legacyProject) {
+      state = adoptLegacyProject(convId, ui.legacyProject());
+      if (state) dir = projectDir(id);
+    }
     const llm = explainerLLM();
     const progress = (m) => ui.progress(m);
 
     // ── New session: research + questions ───────────────────────────
+    if (!state && isCommand(message)) {
+      ui.say('There\'s no video in this conversation yet. Describe the video you want — the product, audience, key points, and any links — and attach a logo or screenshots if you have them.');
+      return;
+    }
     if (!state) {
       state = { stage: 'new', opts: { ...opts, images: undefined }, brief: message, ctx: null, plan: null, answers: '', seed: Math.floor(Math.random() * 2 ** 31), renders: 0 };
       state.ctx = await prepareContext(dir, { brief: message, images }, progress);
@@ -114,6 +166,56 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
 
     const planCtx = () => ({ ...state.opts, ...state.ctx, answers: state.answers });
 
+    // ── Fresh Studio link on request (links expire after 10 min) ─────
+    if (OPEN_STUDIO.test(message)) {
+      if (state.stage !== 'done') {
+        ui.say('Studio opens on the finished video. Approve the storyboard first — once it has rendered, say **open studio** to edit it.');
+      } else {
+        ui.say(studioLine(id, ui).trim() || 'Studio is not available on this server.');
+      }
+      return;
+    }
+
+    // ── Studio "Copy prompt" pasted here: Alice edits the file directly ──
+    if (parseStudioPrompt(message)) {
+      if (state.stage !== 'done') {
+        ui.say('Direct edits work on the finished video. Approve the storyboard first; once it has rendered you can paste prompts from Studio here.');
+        return;
+      }
+      const { assets } = JSON.parse(readFileSync(join(dir, 'assets.json'), 'utf8'));
+      const slots = layoutTimeline(state.plan.scenes, assets);
+      progress(`Editing ${parseStudioPrompt(message).file}…`);
+      const res = await withLLM(() => applyDirectEdit(dir, state.plan, slots, message, { llm }), { onProgress: progress });
+      if (!res.ok) {
+        ui.say(`I couldn't make that edit cleanly — the result kept failing checks, so I left **${res.file}** unchanged:\n\n${res.problems.slice(0, 4).map(p => `- ${p}`).join('\n')}\n\nTry rewording the request, or make this one by hand in Studio.`);
+        return;
+      }
+      progress('Edit passed checks — rendering…');
+      const file = await renderProject(dir, join(dir, 'out.mp4'));
+      state.handEdited = true;
+      state.composedAt = compositionMtime(dir);
+      save(dir, state);
+      const url = await ui.saveVideo(file, state.plan.title);
+      ui.say(`Done — edited **${res.file}**${res.attempts > 1 ? ' (second attempt)' : ''}. If Studio is open it has already reloaded the change.\n\n[Download video](${url})\n\n<video controls width="640" src="${url}"></video>`);
+      return;
+    }
+
+    // ── Render the project exactly as edited in Studio ──────────────
+    if (state.stage === 'done' && RENDER_EDITS.test(message)) {
+      progress('Rendering your Studio edits…');
+      const file = await renderProject(dir, join(dir, 'out.mp4'));
+      state.composedAt = compositionMtime(dir);
+      state.handEdited = true;
+      save(dir, state);
+      const url = await ui.saveVideo(file, state.plan.title);
+      ui.say(`**${state.plan.title}** — rendered with your Studio edits.\n\n[Download video](${url})\n\n<video controls width="640" src="${url}"></video>${studioLine(id, ui)}`);
+      return;
+    }
+    if (state.stage === 'done' && hasStudioEdits(dir, state) && !OVERRIDE_EDITS.test(message)) {
+      ui.say('You\'ve edited this video in Studio. Revising the storyboard would rebuild the composition and **replace those edits**.\n\nReply **render my edits** to render what you have in Studio, or repeat your request with the word **anyway** to revise the storyboard (and lose the Studio edits).');
+      return;
+    }
+
     // ── Answers → first storyboard ──────────────────────────────────
     if (state.stage === 'questions') {
       state.answers = message && !SKIP_QUESTIONS.test(message) ? message : 'No answers — use your suggested defaults.';
@@ -133,10 +235,11 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
         state.stage = 'done';
         state.renders += 1;
         state.portraitFile = out.portraitFile;
+        state.composedAt = compositionMtime(dir);
         save(dir, state);
         const url = await ui.saveVideo(out.file, state.plan.title);
         const warn = out.warnings.length ? `\n\n_Notes: ${out.warnings.join('; ')}_` : '';
-        ui.say(`\n**${state.plan.title}** is ready.${warn}\n\n[Download video](${url})\n\n<video controls width="640" src="${url}"></video>\n\nWant changes? Tell me what to adjust and I'll update the storyboard — unchanged scenes are reused.`);
+        ui.say(`\n**${state.plan.title}** is ready.${warn}\n\n[Download video](${url})\n\n<video controls width="640" src="${url}"></video>${studioLine(id, ui)}\n\nWant changes? Tell me what to adjust and I'll update the storyboard — unchanged scenes are reused.`);
       } catch (err) {
         state.stage = 'storyboard';
         save(dir, state);
@@ -145,12 +248,20 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
       return;
     }
 
+    state.handEdited = false; // a revision rebuilds the composition from the plan
     progress('Revising the storyboard…');
     state.plan = await withLLM(() => revisePlan(llm, state.plan, message, planCtx()), { onProgress: progress });
     return await showStoryboard(dir, state, ui, progress);
   } finally {
     locks.delete(id);
   }
+}
+
+function studioLine(projectId, ui) {
+  if (!ui.studioLink) return '';
+  try {
+    return `\n\n✏️ [Open in HyperFrames Studio](${ui.studioLink(projectId)}) — fine-tune text, timing and animation on the timeline (link valid 10 minutes), then reply **render my edits**.`;
+  } catch { return ''; }
 }
 
 async function showStoryboard(dir, state, ui, progress) {
