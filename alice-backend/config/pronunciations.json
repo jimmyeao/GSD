@@ -1,4 +1,7 @@
 {
-  "_comment": "Spoken-only pronunciation fixes. Key = word as written (case-insensitive, whole word). Value = a pronunciation hint like \"thee-ah-cast\" (Kokoro gets it joined, \"Theeahcast\"; the LTX presenter gets \"Thee-ah-cast\"), or {\"tts\": \"...\", \"presenter\": \"...\"} to set each engine explicitly. Captions/on-screen text keep the original spelling. Per-video overrides come from the chat (\"X is pronounced Y\").",
-  "TheiaCast": "thee-ah-cast"
+  "_comment": "Spoken-only pronunciation fixes. Key = word as written (case-insensitive, whole word). Value = a pronunciation hint like \"thee-ah-cast\" (Kokoro gets it joined, \"Theeahcast\"; the LTX presenter gets \"Thee-ah-cast\"), or {\"tts\": \"...\", \"presenter\": \"...\"} to set each engine explicitly. Captions/on-screen text keep the original spelling. Per-video overrides come from the chat (\"X is pronounced Y\"). Verified by ear 2026-10-09: TheiaCast is \"THEE-uh-cast\" (Theia, the Greek Titaness) \u2014 Kokoro: \"Theea cast\"; LTX presenter: \"Thee-ah-cast\"; VoxCPM2 (not wired in yet): \"Theea cast\" when cloning bf_alice, \"Thia-cast\" with its default voice.",
+  "TheiaCast": {
+    "tts": "Theea cast",
+    "presenter": "Thee-ah-cast"
+  }
 }

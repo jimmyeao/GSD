@@ -1,6 +1,7 @@
 /**
  * Media generation for the explainer pipeline, using Alice's own models:
- *   voice      Kokoro (TTS service) — narration + a ~5s voice sample
+ *   voice      VoxCPM2 cloned voice on the laptop GPU (Kokoro fallback) —
+ *              narration + a ~5s voice sample the presenter clips clone
  *   portrait   Krea 2 — one presenter image, reused for every clip
  *   images     Krea 2 — narrated-scene backgrounds (skipped for scenes
  *              showing an attached screenshot)
@@ -27,6 +28,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { textToSpeech } from '../../services/ttsService.js';
+import { voxcpmAvailable, voxcpmSpeak, voxcpmUnload } from '../../services/voxcpmClient.js';
 import { generateImage } from '../comfyClient.js';
 import { generateTalkingHead } from '../talkingHeadClient.js';
 import { generateMusic, generateSfx } from '../musicClient.js';
@@ -82,33 +84,50 @@ function dropCache(kind, filename) {
  * attached-media wiring. Returns per-scene assets:
  *   { ttsFile, ttsDur, voiceFile?, voiceDur?, clipSeconds?, mediaFile? }
  */
-export async function voicePhase(dir, plan, { voice, images = [], onProgress = () => {} }) {
+export async function voicePhase(dir, plan, { voice, images = [], onProgress = () => {}, engine: forced } = {}) {
   const chosen = voice || pickVoice(plan.presenter);
+  // One engine per video (never a mix of voices): VoxCPM2 on the laptop GPU
+  // when it's reachable and has this voice cloned, else Kokoro.
+  const engine = forced ?? ((await voxcpmAvailable(chosen)) ? 'voxcpm' : 'kokoro');
+  const speak = engine === 'voxcpm' ? (text) => voxcpmSpeak(text, chosen) : (text) => textToSpeech(text, { voice: chosen });
+  // Both engines read the Kokoro-style respellings correctly (verified by ear).
   const lexicon = loadLexicon(plan.pronunciations);
   const ttsLex = lexiconFor(lexicon, 'tts');
   const presenterLex = lexiconFor(lexicon, 'presenter');
   const assets = plan.scenes.map(() => ({}));
-  onProgress(`Recording voiceover (${chosen})…`);
-  for (const [i, scene] of plan.scenes.entries()) {
-    const a = assets[i];
-    if (scene.media) a.mediaFile = images.find(img => img.id === scene.media)?.file;
-    if (!scene.speech) continue;
-    // Audio uses the respelled line; captions/on-screen text keep scene.speech.
-    a.spoken = applyPronunciations(scene.speech, ttsLex);
-    if (scene.type === 'presenter') a.presenterSpoken = applyPronunciations(scene.speech, presenterLex);
-    const rel = `assets/tts-${assetKey(chosen, a.spoken)}.wav`;
-    if (!existsSync(join(dir, rel))) writeFileSync(join(dir, rel), await textToSpeech(a.spoken, { voice: chosen }));
-    a.ttsFile = rel;
-    a.ttsDur = await probeDuration(join(dir, rel));
-    if (scene.type === 'presenter') a.clipSeconds = clipSecondsFor(a.ttsDur);
-    else { a.voiceFile = rel; a.voiceDur = a.ttsDur; }
+  onProgress(`Recording voiceover (${engine === 'voxcpm' ? `VoxCPM2 · ${chosen} clone, laptop GPU` : `Kokoro · ${chosen}`})…`);
+  try {
+    for (const [i, scene] of plan.scenes.entries()) {
+      const a = assets[i];
+      if (scene.media) a.mediaFile = images.find(img => img.id === scene.media)?.file;
+      if (!scene.speech) continue;
+      // Audio uses the respelled line; captions/on-screen text keep scene.speech.
+      a.spoken = applyPronunciations(scene.speech, ttsLex);
+      if (scene.type === 'presenter') a.presenterSpoken = applyPronunciations(scene.speech, presenterLex);
+      // Kokoro keys stay as before, so existing projects keep their cache.
+      const key = engine === 'kokoro' ? assetKey(chosen, a.spoken) : assetKey(engine, chosen, a.spoken);
+      const rel = `assets/tts-${key}.wav`;
+      if (!existsSync(join(dir, rel))) writeFileSync(join(dir, rel), await speak(a.spoken));
+      a.ttsFile = rel;
+      a.ttsDur = await probeDuration(join(dir, rel));
+      if (scene.type === 'presenter') a.clipSeconds = clipSecondsFor(a.ttsDur);
+      else { a.voiceFile = rel; a.voiceDur = a.ttsDur; }
+    }
+    let voiceRefFile = null;
+    if (plan.scenes.some(s => s.type === 'presenter')) {
+      // The presenter's LTX clips clone THIS sample, so it uses the same engine.
+      voiceRefFile = `assets/voiceref-${engine === 'kokoro' ? assetKey(chosen) : assetKey(engine, chosen)}.wav`;
+      if (!existsSync(join(dir, voiceRefFile))) writeFileSync(join(dir, voiceRefFile), await speak(VOICE_SAMPLE_TEXT));
+    }
+    return { assets, voice: chosen, voiceRefFile, engine };
+  } catch (err) {
+    if (engine !== 'voxcpm') throw err;
+    onProgress(`⚠ VoxCPM2 failed (${err.message}) — re-recording every line with Kokoro so the voice stays consistent`);
+    return voicePhase(dir, plan, { voice, images, onProgress, engine: 'kokoro' });
+  } finally {
+    // Free the laptop GPU before any ComfyUI work (presenter clips run there).
+    if (engine === 'voxcpm') await voxcpmUnload();
   }
-  let voiceRefFile = null;
-  if (plan.scenes.some(s => s.type === 'presenter')) {
-    voiceRefFile = `assets/voiceref-${assetKey(chosen)}.wav`;
-    if (!existsSync(join(dir, voiceRefFile))) writeFileSync(join(dir, voiceRefFile), await textToSpeech(VOICE_SAMPLE_TEXT, { voice: chosen }));
-  }
-  return { assets, voice: chosen, voiceRefFile };
 }
 
 /** Demote a presenter scene to narrated, reusing its Kokoro read. */

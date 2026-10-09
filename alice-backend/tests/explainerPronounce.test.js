@@ -18,7 +18,7 @@ describe('pronunciations', () => {
   });
   it('derives a different respelling per engine', () => {
     const lex = loadLexicon();
-    assert.equal(lexiconFor(lex, 'tts').TheiaCast, 'Theeahcast');        // Kokoro: joined
+    assert.equal(lexiconFor(lex, 'tts').TheiaCast, 'Theea cast');        // Kokoro: verified by ear
     assert.equal(lexiconFor(lex, 'presenter').TheiaCast, 'Thee-ah-cast'); // LTX: hyphenated
     assert.equal(presenterRespelling('thee ah cast'), 'Thee-ah-cast');
     assert.deepEqual(lexiconFor({ X: { presenter: 'ex-ex' } }, 'tts'), {});

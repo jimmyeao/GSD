@@ -1,0 +1,14 @@
+[Unit]
+Description=VoxCPM2 TTS for Alice (cloned voices; shares the GPU with ComfyUI)
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/tts-ab
+EnvironmentFile=%h/.config/voxcpm/env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/tts-ab/voxcpm-venv/bin/python %h/tts-ab/voxcpm_server.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
