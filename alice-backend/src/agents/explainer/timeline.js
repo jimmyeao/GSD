@@ -16,6 +16,7 @@
  */
 
 import { buildLayoutHtml } from './layouts.js';
+import { resolveStyle } from './styles.js';
 
 export const W = 1920;
 export const H = 1080;
@@ -135,30 +136,132 @@ export function captionChunks(words, offset, sceneEnd) {
  * checks. Same file contract as LLM output: <template>, root id = compId,
  * one paused timeline at window.__timelines[compId].
  */
-export function fallbackSceneHtml(compId, scene, { palette, font, duration, words, mediaFile, logoFile }) {
+export function fallbackSceneHtml(compId, scene, { style, palette, font, duration, words, mediaFile, logoFile }) {
   const canvas = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
-  return buildLayoutHtml(compId, scene, { palette, font, duration, words, canvas, mediaFile, logoFile });
+  return buildLayoutHtml(compId, scene, { style, palette, font, duration, words, canvas, mediaFile, logoFile });
 }
 
-function backgroundHtml(i, scene, slot, a, palette) {
-  const base = `id="bg-${i}" class="clip bg" data-start="${slot.start}" data-duration="${slot.duration}" data-track-index="0"`;
-  if (scene.type === 'narrated' && a.imageFile) {
-    return `<div ${base}><div id="kb-${i}" class="kb"><img id="img-${i}" src="${esc(a.imageFile)}" alt="" /></div><div class="shade"></div></div>`;
+// ── Style backgrounds ──────────────────────────────────────────────────
+// Everything inside #bgw-<i> (a NON-timed wrapper inside the timed .bg clip)
+// so transitions can transform/clip it freely. Animated decoration gets ids
+// (bgx-<i>-<k>) and main-timeline tweens at the scene's global time.
+
+function decorHtml(i, scene, st) {
+  const a = st.palette.accent, bg = st.palette.bg, bg2 = st.palette.bg2;
+  const side = i % 2 === 0 ? 'right' : 'left';
+  // Presenter scenes keep the big block behind the panel (right), off the text column.
+  const blockSide = scene.type === 'presenter' ? 'right' : side;
+  switch (st.background) {
+    case 'paper':
+      return `<div class="fill" style="background: radial-gradient(ellipse at ${side === 'right' ? '85% 10%' : '15% 10%'}, #ffffff99 0%, transparent 55%), linear-gradient(180deg, ${bg} 0%, ${bg2} 100%);"></div>
+<div id="bgx-${i}-0" class="rule" style="${side}: 90px; background: ${a};"></div>`;
+    case 'blocks':
+      return `<div class="fill" style="background: ${bg};"></div>
+<div id="bgx-${i}-0" class="block" style="${blockSide}: -520px; top: ${i % 3 === 0 ? -480 : 560}px; background: ${a};"></div>
+<div id="bgx-${i}-1" class="block2" style="${blockSide === 'right' ? 'left' : 'right'}: -330px; bottom: -360px; background: ${bg2}; border: 6px solid ${a}55;"></div>`;
+    case 'grid':
+      return `<div class="fill" style="background: radial-gradient(circle at 70% 30%, ${a}22 0%, transparent 50%), ${bg};"></div>
+<div id="bgx-${i}-0" class="gridlines" style="background-image: linear-gradient(${a}1f 1px, transparent 1px), linear-gradient(90deg, ${a}1f 1px, transparent 1px);"></div>`;
+    case 'aurora':
+      return `<div class="fill" style="background: ${bg};"></div>
+<div id="bgx-${i}-0" class="blob" style="${side}: -120px; top: -160px; background: ${a}55;"></div>
+<div id="bgx-${i}-1" class="blob" style="${side === 'right' ? 'left' : 'right'}: -200px; bottom: -260px; background: ${bg2};"></div>`;
+    case 'spotlight':
+      return `<div class="fill" style="background: linear-gradient(160deg, ${bg2} 0%, ${bg} 70%);"></div>
+<div id="bgx-${i}-0" class="spot" style="background: radial-gradient(circle, ${a}55 0%, transparent 60%);"></div>`;
+    default: { // gradient
+      const angle = (i * 47) % 360;
+      return `<div class="fill" style="background: radial-gradient(circle at ${scene.type === 'presenter' ? '75% 50%' : '50% 40%'}, ${a}33 0%, transparent 55%), linear-gradient(${angle}deg, ${bg} 0%, ${bg2} 100%);"></div>`;
+    }
   }
-  const angle = (i * 47) % 360;
-  return `<div ${base}><div class="grad" style="background: radial-gradient(circle at ${scene.type === 'presenter' ? '75% 50%' : '50% 40%'}, ${palette.accent}33 0%, transparent 55%), linear-gradient(${angle}deg, ${palette.bg} 0%, #000000 100%);"></div></div>`;
+}
+
+/** Ambient motion for a scene's decoration (global time). */
+function decorTweens(i, slot, st) {
+  const t = slot.start, d = slot.duration;
+  switch (st.background) {
+    case 'paper': return [`tl.fromTo("#bgx-${i}-0", { scaleY: 0, transformOrigin: "top center" }, { scaleY: 1, duration: 1.2, ease: "power2.inOut" }, ${r2(t + 0.1)});`];
+    case 'blocks': return [
+      `tl.fromTo("#bgx-${i}-0", { rotation: -18, xPercent: ${i % 2 === 0 ? 40 : -40} }, { rotation: -12, xPercent: 0, duration: 0.6, ease: "back.out(1.4)" }, ${r2(t)});`,
+      `tl.fromTo("#bgx-${i}-1", { rotation: 20, scale: 0.6 }, { rotation: 14, scale: 1, duration: 0.7, ease: "back.out(1.6)" }, ${r2(t + 0.1)});`];
+    case 'grid': return [`tl.fromTo("#bgx-${i}-0", { backgroundPosition: "0px 0px" }, { backgroundPosition: "0px 120px", duration: ${d}, ease: "none" }, ${t});`];
+    case 'aurora': return [
+      `tl.fromTo("#bgx-${i}-0", { x: 0, y: 0 }, { x: ${i % 2 ? 80 : -80}, y: 60, duration: ${d}, ease: "sine.inOut" }, ${t});`,
+      `tl.fromTo("#bgx-${i}-1", { x: 0, y: 0 }, { x: ${i % 2 ? -60 : 60}, y: -40, duration: ${d}, ease: "sine.inOut" }, ${t});`];
+    case 'spotlight': return [`tl.fromTo("#bgx-${i}-0", { x: ${i % 2 ? 900 : -300}, y: -100 }, { x: ${i % 2 ? -300 : 900}, y: 200, duration: ${d}, ease: "sine.inOut" }, ${t});`];
+    default: return [];
+  }
+}
+
+function backgroundHtml(i, scene, slot, a, st, clipDuration) {
+  const base = `id="bg-${i}" class="clip bg" data-start="${slot.start}" data-duration="${clipDuration}" data-track-index="0"`;
+  const inner = scene.type === 'narrated' && a.imageFile
+    ? `<div id="kb-${i}" class="kb"><img id="img-${i}" src="${esc(a.imageFile)}" alt="" /></div><div class="shade"></div>`
+    : decorHtml(i, scene, st);
+  return `<div ${base}><div id="bgw-${i}" class="bgw">${inner}</div></div>`;
+}
+
+/**
+ * Scene-to-scene transition tweens (entering scene i at slot.start).
+ * The previous scene's background/graphics stay on screen for `dur` (their
+ * clips are extended), so the new scene can be revealed over them.
+ */
+function transitionTweens(i, slot, st, scene) {
+  if (i === 0) return [];
+  const t = r2(slot.start), { type, dur } = st.transition;
+  const D = r2(dur), prev = i - 1;
+  const out = [`tl.to("#g-${prev}", { opacity: 0, duration: ${r2(D * 0.6)}, ease: "power1.in" }, ${t});`];
+  const gfxIn = `tl.fromTo("#g-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.out" }, ${t});`;
+  const presIn = scene.type === 'presenter' ? `tl.fromTo("#presenter-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.out" }, ${t});` : '';
+  switch (type) {
+    case 'wipe':
+      out.push(`tl.fromTo("#bgw-${i}", { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: ${D}, ease: "power2.inOut" }, ${t});`);
+      break;
+    case 'push':
+      out.push(`tl.fromTo("#bgw-${i}", { x: ${W} }, { x: 0, duration: ${D}, ease: "power3.inOut" }, ${t});`,
+        `tl.fromTo("#bgw-${prev}", { x: 0 }, { x: ${-W}, duration: ${D}, ease: "power3.inOut" }, ${t});`);
+      break;
+    case 'zoom':
+      out.push(`tl.fromTo("#bgw-${i}", { scale: 1.35, opacity: 0 }, { scale: 1, opacity: 1, duration: ${D}, ease: "expo.out" }, ${t});`,
+        `tl.fromTo("#bgw-${prev}", { scale: 1 }, { scale: 0.85, duration: ${D}, ease: "power2.in" }, ${t});`);
+      break;
+    case 'slideup':
+      out.push(`tl.fromTo("#bgw-${i}", { y: ${H} }, { y: 0, duration: ${D}, ease: "power3.out" }, ${t});`);
+      break;
+    case 'flash':
+      out.push(`tl.fromTo("#flash-${i}", { opacity: 0 }, { opacity: 1, duration: ${r2(D * 0.3)}, ease: "power2.in" }, ${r2(t - D * 0.3)});`,
+        `tl.to("#flash-${i}", { opacity: 0, duration: ${r2(D * 0.7)}, ease: "power2.out" }, ${t});`);
+      break;
+    default: // crossfade
+      out.push(`tl.fromTo("#bgw-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.inOut" }, ${t});`);
+  }
+  out.push(gfxIn);
+  if (presIn) out.push(presIn);
+  return out;
+}
+
+function panelBorder(st) {
+  switch (st.panel.border) {
+    case 'accent': return `3px solid ${st.palette.accent}55`;
+    case 'hairline': return '1px solid rgba(0,0,0,0.2)';
+    case 'thick': return '6px solid #000000';
+    case 'glow': return `2px solid ${st.palette.accent}`;
+    default: return 'none';
+  }
 }
 
 /**
  * Build the root index.html.
- * @param {object} plan     normalized plan
+ * @param {object} plan     normalized plan (plan.style picks the preset)
  * @param {object[]} assets per scene: { voiceFile, voiceDur, clipFile, clipDur, imageFile, sfxFile, words }
  * @param {{musicFile?: string, portraitFile?: string}} global
  *   portraitFile is only used by the draft animatic's presenter placeholder.
  */
 export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
+  const st = resolveStyle(plan);
   const slots = layoutTimeline(plan.scenes, assets);
   const total = r2(slots.at(-1).start + slots.at(-1).duration);
+  const T = st.transition.dur;
   const parts = [];
   const tweens = [];
   const captions = [];
@@ -166,9 +269,16 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
   plan.scenes.forEach((scene, i) => {
     const slot = slots[i];
     const a = assets[i] ?? {};
-    parts.push(backgroundHtml(i, scene, slot, a, plan.palette));
+    // Stay on screen through the next scene's entrance transition.
+    const held = i < plan.scenes.length - 1 ? r2(slot.duration + T) : slot.duration;
+    parts.push(backgroundHtml(i, scene, slot, a, st, held));
     if (scene.type === 'narrated' && a.imageFile) {
-      tweens.push(`tl.fromTo("#kb-${i}", { scale: 1.0 }, { scale: 1.08, duration: ${slot.duration}, ease: "none" }, ${slot.start});`);
+      tweens.push(`tl.fromTo("#kb-${i}", { scale: 1.0 }, { scale: 1.08, duration: ${held}, ease: "none" }, ${slot.start});`);
+    } else {
+      tweens.push(...decorTweens(i, { start: slot.start, duration: held }, st));
+    }
+    if (st.transition.type === 'flash' && i > 0) {
+      parts.push(`<div id="flash-${i}" class="clip flash" data-start="${r2(Math.max(0, slot.start - T * 0.3))}" data-duration="${r2(T)}" data-track-index="4"></div>`);
     }
     if (scene.type === 'presenter' && a.clipFile) {
       parts.push(`<video id="presenter-${i}" class="clip presenter" src="${esc(a.clipFile)}" playsinline data-has-audio="true" data-volume="1" data-start="${slot.start}" data-duration="${slot.duration}" data-track-index="1"></video>`);
@@ -180,7 +290,8 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
       parts.push(`<div id="presenter-${i}" class="clip presenter pph" data-start="${slot.start}" data-duration="${slot.duration}" data-track-index="1">${inner}</div>`);
     }
     const area = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
-    parts.push(`<div id="g-${i}" class="gfx" style="left: ${area.x}px; top: ${area.y}px; width: ${area.width}px; height: ${area.height}px;" data-composition-id="scene-${i}" data-composition-src="compositions/scene-${i}.html" data-start="${slot.start}" data-duration="${slot.duration}" data-track-index="2" data-width="${area.width}" data-height="${area.height}"></div>`);
+    parts.push(`<div id="g-${i}" class="gfx" style="left: ${area.x}px; top: ${area.y}px; width: ${area.width}px; height: ${area.height}px;" data-composition-id="scene-${i}" data-composition-src="compositions/scene-${i}.html" data-start="${slot.start}" data-duration="${held}" data-track-index="2" data-width="${area.width}" data-height="${area.height}"></div>`);
+    tweens.push(...transitionTweens(i, slot, st, scene));
 
     const speechOffset = scene.type === 'presenter' ? slot.start : slot.start + VOICE_LEAD;
     if (a.voiceFile) {
@@ -199,7 +310,10 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
     parts.push(`<audio id="music" src="${esc(musicFile)}" data-start="0" data-duration="${total}" data-volume="0.16" data-track-index="7"></audio>`);
   }
 
-  const { palette, font } = plan;
+  const pal = st.palette, cap = st.caption;
+  const shade = st.imageShade === 'light'
+    ? `linear-gradient(90deg, ${pal.bg}f0 0%, ${pal.bg}b3 55%, ${pal.bg}cc 100%)`
+    : 'linear-gradient(90deg, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0.5) 60%, rgba(0,0,0,0.62) 100%)';
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -208,15 +322,23 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
 <title>${esc(plan.title)}</title>
 <script src="assets/gsap.min.js"></script>
 <style>
-  body { margin: 0; background: ${palette.bg}; }
-  #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: ${palette.bg}; font-family: "${font}", sans-serif; }
+  body { margin: 0; background: ${pal.bg}; }
+  #root { position: relative; width: 100%; height: 100%; overflow: hidden; background: ${pal.bg}; font-family: "${st.font.body}", sans-serif; }
   .bg { position: absolute; inset: 0; overflow: hidden; }
-  .bg .grad { position: absolute; inset: 0; }
+  .bgw { position: absolute; inset: 0; overflow: hidden; }
+  .fill { position: absolute; inset: 0; }
+  .rule { position: absolute; top: 0; bottom: 0; width: 2px; opacity: 0.55; }
+  .block { position: absolute; width: 820px; height: 820px; transform: rotate(-12deg); }
+  .block2 { position: absolute; width: 520px; height: 520px; transform: rotate(14deg); }
+  .gridlines { position: absolute; inset: -120px 0 0 0; background-size: 60px 60px; }
+  .blob { position: absolute; width: 900px; height: 900px; border-radius: 50%; filter: blur(120px); }
+  .spot { position: absolute; width: 1400px; height: 1400px; border-radius: 50%; }
+  .flash { position: absolute; inset: 0; background: #ffffff; opacity: 0; }
   .kb { position: absolute; inset: 0; }
   .kb img { width: 100%; height: 100%; object-fit: cover; display: block; filter: blur(6px) saturate(0.85); transform: scale(1.04); }
-  .shade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(0,0,0,0.78) 0%, rgba(0,0,0,0.5) 60%, rgba(0,0,0,0.62) 100%); }
+  .shade { position: absolute; inset: 0; background: ${shade}; }
   .presenter { position: absolute; right: ${PRESENTER_BOX.right}px; top: ${PRESENTER_BOX.top}px; width: ${PRESENTER_BOX.width}px; height: ${PRESENTER_BOX.height}px;
-    object-fit: cover; border-radius: 28px; box-shadow: 0 30px 80px rgba(0,0,0,0.55); border: 3px solid ${palette.accent}55; }
+    object-fit: cover; border-radius: ${st.panel.radius}px; box-shadow: ${st.panel.shadow}; border: ${panelBorder(st)}; }
   .gfx { position: absolute; overflow: hidden; }
   .pph { overflow: hidden; background: #20242e; }
   .pph img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -226,7 +348,7 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
   .pph-tag { font-weight: 800; letter-spacing: 0.2em; margin-bottom: 8px; color: #c9d1e3; }
   .pph-label { margin-top: 22px; font-size: 24px; text-align: center; max-width: 820px; line-height: 1.35; letter-spacing: 0.02em; }
   .caption { position: absolute; left: 0; right: 0; bottom: ${CAPTION_BAND.bottom}px; display: flex; justify-content: center; }
-  .caption span { background: rgba(0,0,0,0.62); color: #ffffff; font-size: 44px; font-weight: 600; padding: 12px 28px; border-radius: 14px; }
+  .caption span { background: ${cap.bg}; color: ${cap.color}; font-size: 44px; font-weight: ${cap.weight}; padding: 12px 28px; border-radius: ${cap.radius}px; text-transform: ${cap.transform}; border: ${cap.border}; }
 </style>
 </head>
 <body>

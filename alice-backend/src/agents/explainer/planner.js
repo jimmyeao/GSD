@@ -11,6 +11,7 @@ import { complete } from '../llmClient.js';
 import { LAYOUTS } from './layouts.js';
 import { cleanLexicon } from './pronounce.js';
 import { findUnsupportedClaims, describeIssues, scrubClaims } from './grounding.js';
+import { STYLES, STYLE_IDS, DEFAULT_STYLE } from './styles.js';
 
 export const ALLOWED_FONTS = ['Inter', 'Montserrat', 'Poppins', 'Roboto', 'Outfit', 'Playfair Display'];
 export const SCENE_TYPES = ['title', 'presenter', 'narrated', 'outro'];
@@ -42,7 +43,8 @@ export function buildPlannerPrompt({ brief, format, presenter, maxPresenterScene
 Schema:
 {
   "title": string,
-  "palette": { "bg": "#rrggbb", "text": "#rrggbb", "accent": "#rrggbb" },
+  "style": one of ${JSON.stringify(STYLE_IDS)},   // the video's visual style — see the list below
+  "palette": { "bg": "#rrggbb", "text": "#rrggbb", "accent": "#rrggbb" },   // accent = the brand colour (the style sets background and text)
   "font": one of ${JSON.stringify(ALLOWED_FONTS)},
   "presenter": ${presenter ? '{ "gender": "female" | "male", "description": string }  // one on-camera presenter: gender, age, hair, clothing, setting — used to generate their portrait AND pick their voice' : 'null'},
   "music": { "prompt": string },   // instrumental background bed: genre, instruments, mood, tempo
@@ -71,7 +73,9 @@ Rules:
 - ${presenter ? `Use at most ${maxPresenterScenes} "presenter" scenes (the presenter speaks to camera); use "narrated" scenes (voiceover over a background image + graphics) for the rest.` : 'Do not use "presenter" scenes — use "narrated" scenes.'}
 - Speech is conversational, concrete and benefit-led. No stage directions in speech.
 - Layouts: "title" for the opening card (bullets[0] = optional subtitle), "cta" for the outro (bullets[0] = button text, e.g. "Start free trial"), and for the middle scenes vary between "bullets", "stat" (one striking number), "steps" (how it works), "compare" (before vs after) and "statement" (one bold sentence as the headline; wrap 1-3 key words in *asterisks* to highlight them). Don't use the same middle layout more than twice in a row.
-- palette: dark, high-contrast bg with a vivid accent; text must be readable on bg.
+- style — pick the one that best fits the brand, audience and tone (and follow the client if they ask for a look):
+${STYLE_IDS.map(id => `  - "${id}": ${STYLES[id].description}`).join('\n')}
+- palette.accent: the brand's main colour if known (from the website/logo), else one that suits the style.
 - Stay factual: every number, price, feature, claim and call to action must come from the brief, the source material or the client's answers. Never invent statistics — only use the "stat" layout for a number that appears in them.
 - Spell product, company and feature names exactly as they appear in the brief/source material (same capitalisation) — in speech too. If the client says how a word is pronounced, keep its normal spelling everywhere and add it to "pronunciations" instead.${shots.length ? `
 - Attached screenshots/photos are the real product — use each of them once: set "media" to its id and use layout "showcase" (the image is shown large beside the headline and bullets). Write that scene's speech about what the image shows.` : ''}${hasLogo ? '\n- A logo is attached; it is placed on the title and outro cards automatically.' : ''}
@@ -226,6 +230,7 @@ export function normalizePlan(raw, { presenter, maxPresenterScenes, brief = '', 
       accent: HEX.test(palette.accent) ? palette.accent : '#4f8cff',
     },
     font: ALLOWED_FONTS.includes(raw.font) ? raw.font : 'Inter',
+    style: STYLE_IDS.includes(raw.style) ? raw.style : DEFAULT_STYLE,
     presenter: null,
     music: { prompt: str(raw.music?.prompt, 300) || 'modern corporate, light electronic, soft synth pads, steady beat, 100 BPM, instrumental' },
     pronunciations: cleanLexicon(raw.pronunciations),

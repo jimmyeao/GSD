@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { complete } from '../llmClient.js';
 import { ALLOWED_FONTS } from './planner.js';
 import { SAFE_AREAS, fallbackSceneHtml } from './timeline.js';
+import { resolveStyle } from './styles.js';
 
 const MAX_FIX_ROUNDS = 2;
 const ANTI_SECOND_GUESS = 'Think briefly, write the file once, and output it immediately — do not reconsider, revise, or second-guess it once written.';
@@ -171,6 +172,7 @@ function fixMessage(problems) {
  */
 export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slots, onProgress = () => {}, completeFn = complete }) {
   const { palette, font } = plan;
+  const style = resolveStyle(plan);
   const states = plan.scenes.map((scene, i) => ({
     index: i, compId: `scene-${i}`, scene, rounds: 0, done: false, source: 'fallback',
     messages: buildScenePrompt(`scene-${i}`, scene, { palette, font, duration: sceneInfo[i].duration, words: sceneInfo[i].words }),
@@ -189,7 +191,7 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
   };
 
   // Every scene starts as the template, so the project always checks/renders.
-  for (const s of states) writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
+  for (const s of states) writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { style, palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
 
   let pending = states;
   for (let round = 0; round <= MAX_FIX_ROUNDS && pending.length; round++) {
@@ -201,7 +203,7 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
     for (const s of pending) {
       s.rounds = round + 1;
       s.problems = staticCheck(s.html, s.compId, font, s.scene);
-      if (s.problems.length) writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
+      if (s.problems.length) writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { style, palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
       else { writeFileSync(file(s), s.html); candidates.push(s); }
     }
     // One browser check per round covers every candidate scene at once.
@@ -213,7 +215,7 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
     }
     for (const s of pending) {
       if (s.problems.length) {
-        writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
+        writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { style, palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
         if (s.llmError) {
           // Transient LLM failure (e.g. still restarting after ComfyUI) —
           // ask again next round with the same messages, not a fix request.

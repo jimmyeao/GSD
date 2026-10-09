@@ -23,6 +23,7 @@ import { projectDir, prepareContext, addImages, makeAnimatic, produceVideo, with
 import { assertRuntime, renderProject } from './hyperframesCli.js';
 import { parseStudioPrompt, applyDirectEdit } from './directEdit.js';
 import { layoutTimeline } from './timeline.js';
+import { STYLES, STYLE_IDS } from './styles.js';
 
 const APPROVE = /^\s*(approve[d]?|go( ahead)?|render( it)?|looks good|lgtm|yes[,.!]?\s*(render|go|do it|approve)?|ship it|perfect|do it|make it|ok(ay)?[,.!]?\s*(go|render)?)\s*[.!]*\s*$/i;
 const RENDER_EDITS = /\b(render|use|keep) (my |the )?(studio |manual )?edits\b|\brender (the )?studio( version)?\b|\brender (it )?as[- ]is\b/i;
@@ -93,7 +94,8 @@ export function storyboardMarkdown(plan, slots, ctx) {
   });
   const lines = [
     `### Storyboard — ${plan.title}`,
-    `~${Math.round(total)}s · ${plan.scenes.length} scenes · font ${plan.font} · palette ${plan.palette.bg} / ${plan.palette.accent}`,
+    `~${Math.round(total)}s · ${plan.scenes.length} scenes · style **${STYLES[plan.style]?.label ?? plan.style}** (${STYLES[plan.style]?.description ?? ''}) · accent ${plan.palette.accent}`,
+    `_Styles: ${STYLE_IDS.map(id => STYLES[id].label).join(', ')} — say e.g. "make it Editorial" to switch._`,
     plan.presenter ? `**Presenter:** ${plan.presenter.description} (${plan.presenter.gender ?? 'female'} voice)` : '**Presenter:** none (voiceover only)',
     ...(plan.removedClaims?.length ? [`⚠ Removed claims not found in the brief or website: ${plan.removedClaims.map(c => `"${c}"`).join(', ')} — tell me if any of them are real and I'll put them back.`] : []),
     `**Music:** ${plan.music.prompt}`,

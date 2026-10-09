@@ -2,15 +2,20 @@
  * Layout library for explainer scene graphics.
  *
  * The planner (LLM) picks a layout per scene and supplies its content; these
- * builders own the design and motion. Every builder returns a HyperFrames
+ * builders own the structure, and the video's STYLE preset (styles.js) owns
+ * the look: typography, entrance motion, headline marker, bullet glyph, card
+ * treatment and easing. So the same "steps" scene looks completely
+ * different in Editorial vs Bold Pop. Every builder returns a HyperFrames
  * sub-composition file (transparent overlay) sized to the scene's canvas —
  * the safe area it's mounted at (timeline.js SAFE_AREAS) — so the same
  * layout adapts to a full-width narrated scene or the narrow column beside
  * a presenter.
  *
  * Reveal timing: items appear near the spoken word they relate to when word
- * timings are available (revealTimes), else on a steady stagger.
+ * timings are available (revealTimes), else on the style's stagger.
  */
+
+import { resolveStyle, entrance, headCss, marker, bulletCss, cardCss } from './styles.js';
 
 export const LAYOUTS = ['bullets', 'stat', 'steps', 'compare', 'statement', 'showcase', 'title', 'cta'];
 
@@ -41,13 +46,19 @@ export function revealTimes(items, words = [], { firstAt = 0.9, gap = 0.7, lates
   });
 }
 
-function shell(compId, canvas, css, body, script, { palette, font }) {
+function shell(compId, canvas, css, body, script, st) {
+  const glow = st.marker === 'glow' ? ` text-shadow: 0 0 22px ${st.palette.accent}88;` : '';
+  // Bold Pop sits text on accent colour blocks, where accent-coloured words
+  // vanish — so its highlights are a marker band (onAccent text on accent).
+  const accentCss = st.marker === 'block'
+    ? `.accent { color: ${st.palette.onAccent}; background: ${st.palette.accent}; padding: 0 0.12em; box-decoration-break: clone; -webkit-box-decoration-break: clone; }`
+    : `.accent { color: ${st.palette.accent};${glow} }`;
   return `<!doctype html>
 <html><head><meta charset="UTF-8" /></head>
 <body><template>
 <style>
-  #root { position: absolute; inset: 0; font-family: "${font}", sans-serif; color: ${palette.text}; }
-  .accent { color: ${palette.accent}; }
+  #root { position: absolute; inset: 0; font-family: "${st.font.body}", sans-serif; color: ${st.palette.text}; }
+  ${accentCss}
 ${css}
 </style>
 <div id="root" data-composition-id="${compId}" data-width="${canvas.width}" data-height="${canvas.height}">
@@ -65,92 +76,97 @@ ${script}
 // ── Builders ────────────────────────────────────────────────────────────
 
 function bullets(id, s, ctx) {
+  const st = ctx.style;
   const narrow = ctx.canvas.width < 1000;
-  const times = revealTimes(s.bullets, ctx.words, { latest: ctx.duration - 0.8 });
+  const times = revealTimes(s.bullets, ctx.words, { gap: st.motion.stagger, latest: ctx.duration - 0.8 });
+  const mk = marker(st, id);
   const css = `
   #${id}-box { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; }
-  #${id}-bar { width: 120px; height: 10px; border-radius: 5px; background: ${ctx.palette.accent}; margin-bottom: 36px; }
-  #${id}-h { margin: 0; font-size: ${narrow ? 66 : 84}px; font-weight: 800; line-height: 1.06; max-width: ${ctx.canvas.width}px; }
+  ${mk.css}
+  #${id}-h { margin: 0; ${headCss(st, narrow ? 66 : 84)} max-width: ${ctx.canvas.width}px; }
   #${id}-list { margin-top: 44px; display: flex; flex-direction: column; gap: 22px; }
   .${id}-item { display: flex; align-items: center; font-size: ${narrow ? 38 : 46}px; font-weight: 500; }
-  .${id}-dot { width: 18px; height: 18px; border-radius: 50%; background: ${ctx.palette.accent}; margin-right: 22px; flex: none; }`;
-  const body = `<div id="${id}-box"><div id="${id}-bar"></div><h1 id="${id}-h">${esc(s.headline)}</h1>
+  ${bulletCss(st, `${id}-dot`)}`;
+  const body = `<div id="${id}-box">${mk.html}<h1 id="${id}-h">${esc(s.headline)}</h1>
   <div id="${id}-list">${s.bullets.map((b, i) => `<div id="${id}-b${i}" class="${id}-item"><span class="${id}-dot"></span>${esc(b)}</div>`).join('')}</div></div>`;
-  const script = `  tl.fromTo("#${id}-bar", { scaleX: 0, transformOrigin: "left center" }, { scaleX: 1, duration: 0.5, ease: "power3.out" }, 0.1);
-  tl.fromTo("#${id}-h", { y: 40, opacity: 0 }, { y: 0, opacity: 1, duration: 0.7, ease: "power3.out" }, 0.2);
-${s.bullets.map((_, i) => `  tl.fromTo("#${id}-b${i}", { x: -30, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: "power2.out" }, ${times[i]});`).join('\n')}`;
-  return shell(id, ctx.canvas, css, body, script, ctx);
+  const script = [mk.tween, entrance(st, `#${id}-h`, 0.2), ...s.bullets.map((_, i) => entrance(st, `#${id}-b${i}`, times[i], { distance: 30, dur: st.motion.dur * 0.75 }))].join('\n');
+  return shell(id, ctx.canvas, css, body, script, st);
 }
 
 function stat(id, s, ctx) {
-  const st = s.stat ?? {};
-  const from = Number.isFinite(st.from) ? st.from : 0;
-  const to = Number.isFinite(st.to) ? st.to : 100;
+  const st = ctx.style;
+  const sv = s.stat ?? {};
+  const from = Number.isFinite(sv.from) ? sv.from : 0;
+  const to = Number.isFinite(sv.to) ? sv.to : 100;
   const decimals = [from, to].some(n => !Number.isInteger(n)) ? 1 : 0;
-  const fmt = (n) => `${esc(st.prefix ?? '')}${n.toFixed(decimals)}${esc(st.suffix ?? '')}`;
+  const fmt = (n) => `${esc(sv.prefix ?? '')}${n.toFixed(decimals)}${esc(sv.suffix ?? '')}`;
   const narrow = ctx.canvas.width < 1000;
   const countFor = Math.min(2.2, Math.max(1, ctx.duration - 2));
+  const glow = st.marker === 'glow' || st.id === 'techgrid' ? ` text-shadow: 0 0 40px ${st.palette.accent}99;` : '';
   const css = `
   #${id}-box { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; align-items: ${narrow ? 'flex-start' : 'center'}; text-align: ${narrow ? 'left' : 'center'}; }
-  #${id}-h { margin: 0 0 18px; font-size: ${narrow ? 44 : 56}px; font-weight: 600; opacity: 0.9; }
-  #${id}-n { font-size: ${narrow ? 170 : 240}px; font-weight: 800; line-height: 1; color: ${ctx.palette.accent}; font-variant-numeric: tabular-nums; }
+  #${id}-h { margin: 0 0 18px; font-size: ${narrow ? 44 : 56}px; font-weight: 600; color: ${st.palette.muted}; ${st.font.headCase === 'uppercase' ? 'text-transform: uppercase; letter-spacing: 0.08em;' : ''} }
+  #${id}-n { ${headCss(st, narrow ? 170 : 240)} line-height: 1; color: ${st.palette.accent}; font-variant-numeric: tabular-nums;${glow} }
   #${id}-l { margin-top: 24px; font-size: ${narrow ? 40 : 52}px; font-weight: 500; max-width: ${ctx.canvas.width}px; }`;
-  const body = `<div id="${id}-box"><div id="${id}-h">${esc(s.headline)}</div><div id="${id}-n">${fmt(from)}</div><div id="${id}-l">${esc(st.label ?? '')}</div></div>`;
-  const script = `  const num = document.getElementById("${id}-n");
+  const body = `<div id="${id}-box"><div id="${id}-h">${esc(s.headline)}</div><div id="${id}-n">${fmt(from)}</div><div id="${id}-l">${esc(sv.label ?? '')}</div></div>`;
+  const script = `${entrance(st, `#${id}-h`, 0.15, { distance: 30 })}
+  tl.fromTo("#${id}-n", { scale: 0.85, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.6, ease: "${st.motion.emph}" }, 0.35);
+  const num = document.getElementById("${id}-n");
   const counter = { v: ${from} };
-  tl.fromTo("#${id}-h", { y: 30, opacity: 0 }, { y: 0, opacity: 1, duration: 0.6, ease: "power3.out" }, 0.15);
-  tl.fromTo("#${id}-n", { scale: 0.85, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.6, ease: "back.out(1.6)" }, 0.35);
   tl.fromTo(counter, { v: ${from} }, { v: ${to}, duration: ${r2(countFor)}, ease: "power2.out",
-    onUpdate: () => { num.textContent = ${JSON.stringify(st.prefix ?? '')} + counter.v.toFixed(${decimals}) + ${JSON.stringify(st.suffix ?? '')}; } }, 0.6);
-  tl.fromTo("#${id}-l", { y: 24, opacity: 0 }, { y: 0, opacity: 1, duration: 0.6, ease: "power2.out" }, ${r2(Math.min(0.6 + countFor, ctx.duration - 0.8))});`;
-  return shell(id, ctx.canvas, css, body, script, ctx);
+    onUpdate: () => { num.textContent = ${JSON.stringify(sv.prefix ?? '')} + counter.v.toFixed(${decimals}) + ${JSON.stringify(sv.suffix ?? '')}; } }, 0.6);
+${entrance(st, `#${id}-l`, Math.min(0.6 + countFor, ctx.duration - 0.8), { distance: 24 })}`;
+  return shell(id, ctx.canvas, css, body, script, st);
 }
 
 function steps(id, s, ctx) {
+  const st = ctx.style;
   const items = (s.steps?.length ? s.steps : s.bullets).slice(0, 4);
   const narrow = ctx.canvas.width < 1000;
-  const times = revealTimes(items, ctx.words, { firstAt: 0.8, gap: 0.6, latest: ctx.duration - 0.8 });
+  const times = revealTimes(items, ctx.words, { firstAt: 0.8, gap: st.motion.stagger * 0.85, latest: ctx.duration - 0.8 });
+  const numRadius = st.card.radius === 0 ? '0' : '50%';
   const css = `
   #${id}-box { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; }
-  #${id}-h { margin: 0 0 48px; font-size: ${narrow ? 60 : 76}px; font-weight: 800; }
+  #${id}-h { margin: 0 0 48px; ${headCss(st, narrow ? 60 : 76)} }
   #${id}-row { display: flex; flex-direction: ${narrow ? 'column' : 'row'}; gap: ${narrow ? 22 : 32}px; }
-  .${id}-card { flex: 1; background: rgba(255,255,255,0.07); border: 2px solid rgba(255,255,255,0.12); border-radius: 24px; padding: ${narrow ? '22px 28px' : '36px 32px'}; display: flex; ${narrow ? 'align-items: center; gap: 24px;' : 'flex-direction: column; gap: 20px;'} }
-  .${id}-num { width: 64px; height: 64px; border-radius: 50%; background: ${ctx.palette.accent}; color: ${ctx.palette.bg}; font-size: 34px; font-weight: 800; display: flex; align-items: center; justify-content: center; flex: none; }
+  .${id}-card { flex: 1; ${cardCss(st)} padding: ${narrow ? '22px 28px' : '36px 32px'}; display: flex; ${narrow ? 'align-items: center; gap: 24px;' : 'flex-direction: column; gap: 20px;'} }
+  .${id}-num { width: 64px; height: 64px; border-radius: ${numRadius}; background: ${st.palette.accent}; color: ${st.palette.onAccent}; font-size: 34px; font-weight: 800; display: flex; align-items: center; justify-content: center; flex: none; font-family: "${st.font.display}", sans-serif; }
   .${id}-t { font-size: ${narrow ? 34 : 40}px; font-weight: 600; line-height: 1.2; }`;
   const body = `<div id="${id}-box"><h1 id="${id}-h">${esc(s.headline)}</h1><div id="${id}-row">
   ${items.map((t, i) => `<div id="${id}-c${i}" class="${id}-card"><div class="${id}-num">${i + 1}</div><div class="${id}-t">${esc(t)}</div></div>`).join('\n  ')}</div></div>`;
-  const script = `  tl.fromTo("#${id}-h", { y: 36, opacity: 0 }, { y: 0, opacity: 1, duration: 0.6, ease: "power3.out" }, 0.15);
-${items.map((_, i) => `  tl.fromTo("#${id}-c${i}", { y: 40, opacity: 0 }, { y: 0, opacity: 1, duration: 0.55, ease: "power3.out" }, ${times[i]});`).join('\n')}`;
-  return shell(id, ctx.canvas, css, body, script, ctx);
+  const script = [entrance(st, `#${id}-h`, 0.15, { distance: 36 }), ...items.map((_, i) => entrance(st, `#${id}-c${i}`, times[i], { distance: 40, dur: st.motion.dur * 0.8 }))].join('\n');
+  return shell(id, ctx.canvas, css, body, script, st);
 }
 
 function compare(id, s, ctx) {
+  const st = ctx.style;
   const c = s.compare ?? {};
   const left = (c.left ?? []).slice(0, 3);
   const right = (c.right ?? []).slice(0, 3);
   const narrow = ctx.canvas.width < 1000;
   const mid = Math.min(ctx.duration * 0.45, ctx.duration - 1.6);
-  const col = (side, title, items, accent) => `<div id="${id}-${side}" class="${id}-col${accent ? ` ${id}-hot` : ''}"><div class="${id}-ct">${esc(title)}</div>${items.map((t, i) => `<div id="${id}-${side}${i}" class="${id}-ci">${esc(t)}</div>`).join('')}</div>`;
+  const col = (side, title, items, hot) => `<div id="${id}-${side}" class="${id}-col${hot ? ` ${id}-hot` : ''}"><div class="${id}-ct">${esc(title)}</div>${items.map((t, i) => `<div id="${id}-${side}${i}" class="${id}-ci">${esc(t)}</div>`).join('')}</div>`;
   const css = `
   #${id}-box { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; }
-  #${id}-h { margin: 0 0 40px; font-size: ${narrow ? 56 : 72}px; font-weight: 800; }
+  #${id}-h { margin: 0 0 40px; ${headCss(st, narrow ? 56 : 72)} }
   #${id}-row { display: flex; flex-direction: ${narrow ? 'column' : 'row'}; gap: 32px; }
-  .${id}-col { flex: 1; border-radius: 24px; padding: ${narrow ? '22px 28px' : '34px 36px'}; background: rgba(255,255,255,0.06); border: 2px solid rgba(255,255,255,0.1); opacity: 0.75; }
-  .${id}-hot { background: ${ctx.palette.accent}22; border-color: ${ctx.palette.accent}; opacity: 1; }
-  .${id}-ct { font-size: ${narrow ? 36 : 44}px; font-weight: 800; margin-bottom: 18px; }
-  .${id}-hot .${id}-ct { color: ${ctx.palette.accent}; }
+  .${id}-col { flex: 1; ${cardCss(st)} padding: ${narrow ? '22px 28px' : '34px 36px'}; opacity: 0.8; }
+  .${id}-hot { border-color: ${st.palette.accent}; outline: 3px solid ${st.palette.accent}; outline-offset: -3px; opacity: 1; }
+  .${id}-ct { font-size: ${narrow ? 36 : 44}px; font-weight: 800; margin-bottom: 18px; font-family: "${st.font.display}", sans-serif; text-transform: ${st.font.headCase}; }
+  .${id}-hot .${id}-ct { color: ${st.card.text ? '#111111' : st.palette.accent}; }
   .${id}-ci { font-size: ${narrow ? 30 : 38}px; font-weight: 500; margin-top: 12px; }`;
   const body = `<div id="${id}-box"><h1 id="${id}-h">${esc(s.headline)}</h1><div id="${id}-row">
   ${col('l', c.left_title || 'Before', left, false)}
   ${col('r', c.right_title || 'After', right, true)}</div></div>`;
-  const script = `  tl.fromTo("#${id}-h", { y: 36, opacity: 0 }, { y: 0, opacity: 1, duration: 0.6, ease: "power3.out" }, 0.15);
-  tl.fromTo("#${id}-l", { x: -40, opacity: 0 }, { x: 0, opacity: 0.75, duration: 0.6, ease: "power3.out" }, 0.6);
-  tl.fromTo("#${id}-r", { x: 40, opacity: 0 }, { x: 0, opacity: 1, duration: 0.6, ease: "power3.out" }, ${r2(Math.max(1.2, mid))});
-  tl.fromTo("#${id}-r", { scale: 1 }, { scale: 1.03, duration: 0.4, ease: "power2.out", yoyo: true, repeat: 1 }, ${r2(Math.max(1.9, mid + 0.7))});`;
-  return shell(id, ctx.canvas, css, body, script, ctx);
+  const script = `${entrance(st, `#${id}-h`, 0.15, { distance: 36 })}
+${entrance(st, `#${id}-l`, 0.6, { distance: 40 })}
+${entrance(st, `#${id}-r`, Math.max(1.2, mid), { distance: 40 })}
+  tl.fromTo("#${id}-r", { scale: 1 }, { scale: 1.03, duration: 0.4, ease: "power2.out", yoyo: true, repeat: 1 }, ${r2(Math.max(1.9, mid + st.motion.dur))});`;
+  return shell(id, ctx.canvas, css, body, script, st);
 }
 
 function statement(id, s, ctx) {
+  const st = ctx.style;
   // Highlight the words the LLM marked with *asterisks* (or the last two).
   const raw = s.headline || '';
   const marked = /\*[^*]+\*/.test(raw);
@@ -162,76 +178,82 @@ function statement(id, s, ctx) {
   const narrow = ctx.canvas.width < 1000;
   const css = `
   #${id}-box { position: absolute; inset: 0; display: flex; align-items: center; justify-content: ${narrow ? 'flex-start' : 'center'}; text-align: ${narrow ? 'left' : 'center'}; }
-  #${id}-q { font-size: ${narrow ? 72 : 104}px; font-weight: 800; line-height: 1.12; max-width: ${Math.round(ctx.canvas.width * 0.92)}px; }
+  #${id}-q { ${headCss(st, narrow ? 72 : 104)} line-height: ${Math.max(1.08, st.font.lineHeight)}; max-width: ${Math.round(ctx.canvas.width * 0.92)}px; }
   .${id}-w { display: inline-block; margin-right: 0.24em; }`;
   const body = `<div id="${id}-box"><div id="${id}-q">${spans.map((x, i) => `<span id="${id}-w${i}" class="${id}-w${x.hot ? ' accent' : ''}">${esc(x.w)}</span>`).join('')}</div></div>`;
   const step = Math.min(0.12, Math.max(0.05, (ctx.duration - 1.5) / Math.max(1, spans.length)));
-  const script = spans.map((_, i) => `  tl.fromTo("#${id}-w${i}", { y: 50, opacity: 0 }, { y: 0, opacity: 1, duration: 0.45, ease: "power3.out" }, ${r2(0.2 + i * step)});`).join('\n');
-  return shell(id, ctx.canvas, css, body, script, ctx);
+  const script = spans.map((_, i) => entrance(st, `#${id}-w${i}`, 0.2 + i * step, { distance: 50, dur: Math.min(0.55, st.motion.dur) })).join('\n');
+  return shell(id, ctx.canvas, css, body, script, st);
 }
 
 function showcase(id, s, ctx) {
+  const st = ctx.style;
   // Real product screenshot in a browser-style frame, text beside it.
-  const times = revealTimes(s.bullets, ctx.words, { firstAt: 1.1, gap: 0.7, latest: ctx.duration - 0.8 });
+  const times = revealTimes(s.bullets, ctx.words, { firstAt: 1.1, gap: st.motion.stagger, latest: ctx.duration - 0.8 });
   const shotW = Math.round(ctx.canvas.width * 0.6);
+  const mk = marker(st, id, 0.3);
+  const light = st.mode === 'light';
   const css = `
   #${id}-txt { position: absolute; left: 0; top: 0; bottom: 0; width: ${ctx.canvas.width - shotW - 60}px; display: flex; flex-direction: column; justify-content: center; }
-  #${id}-bar { width: 110px; height: 10px; border-radius: 5px; background: ${ctx.palette.accent}; margin-bottom: 32px; }
-  #${id}-h { margin: 0; font-size: 64px; font-weight: 800; line-height: 1.08; }
+  ${mk.css}
+  #${id}-h { margin: 0; ${headCss(st, 64)} }
   #${id}-list { margin-top: 36px; display: flex; flex-direction: column; gap: 18px; }
   .${id}-item { display: flex; align-items: center; font-size: 36px; font-weight: 500; }
-  .${id}-dot { width: 16px; height: 16px; border-radius: 50%; background: ${ctx.palette.accent}; margin-right: 18px; flex: none; }
-  #${id}-win { position: absolute; right: 0; top: 50%; margin-top: -${Math.round(shotW * 0.33)}px; width: ${shotW}px; border-radius: 18px; overflow: hidden;
-    background: #1b1f27; box-shadow: 0 40px 90px rgba(0,0,0,0.6); border: 2px solid rgba(255,255,255,0.12); }
-  #${id}-chrome { height: 38px; display: flex; align-items: center; gap: 10px; padding-left: 18px; background: #2a2f3a; }
+  ${bulletCss(st, `${id}-dot`, 16)}
+  #${id}-win { position: absolute; right: 0; top: 50%; margin-top: -${Math.round(shotW * 0.33)}px; width: ${shotW}px; border-radius: ${Math.min(18, st.card.radius || 0)}px; overflow: hidden;
+    background: ${light ? '#ffffff' : '#1b1f27'}; box-shadow: ${st.panel.shadow}; border: ${light ? '1px solid rgba(0,0,0,0.15)' : '2px solid rgba(255,255,255,0.12)'}; }
+  #${id}-chrome { height: 38px; display: flex; align-items: center; gap: 10px; padding-left: 18px; background: ${light ? '#ebe6dc' : '#2a2f3a'}; }
   .${id}-dotc { width: 13px; height: 13px; border-radius: 50%; }
   #${id}-viewport { position: relative; overflow: hidden; }
   #${id}-img { display: block; width: 100%; height: auto; transform-origin: 50% 40%; }`;
-  const body = `<div id="${id}-txt"><div id="${id}-bar"></div><h1 id="${id}-h">${esc(s.headline)}</h1>
+  const body = `<div id="${id}-txt">${mk.html}<h1 id="${id}-h">${esc(s.headline)}</h1>
   <div id="${id}-list">${s.bullets.map((b, i) => `<div id="${id}-b${i}" class="${id}-item"><span class="${id}-dot"></span>${esc(b)}</div>`).join('')}</div></div>
   <div id="${id}-win"><div id="${id}-chrome"><span class="${id}-dotc" style="background:#ff5f57"></span><span class="${id}-dotc" style="background:#febc2e"></span><span class="${id}-dotc" style="background:#28c840"></span></div>
   <div id="${id}-viewport"><img id="${id}-img" src="${escRaw(ctx.mediaFile ?? '')}" alt="" /></div></div>`;
-  const script = `  tl.fromTo("#${id}-win", { y: 60, opacity: 0, rotationY: -8, transformPerspective: 1600 }, { y: 0, opacity: 1, rotationY: 0, duration: 0.9, ease: "power3.out" }, 0.1);
+  const script = `  tl.fromTo("#${id}-win", { y: 60, opacity: 0, rotationY: -8, transformPerspective: 1600 }, { y: 0, opacity: 1, rotationY: 0, duration: 0.9, ease: "${st.motion.ease}" }, 0.1);
   tl.fromTo("#${id}-img", { scale: 1.0 }, { scale: 1.06, duration: ${r2(Math.max(1, ctx.duration - 0.2))}, ease: "none" }, 0.2);
-  tl.fromTo("#${id}-bar", { scaleX: 0, transformOrigin: "left center" }, { scaleX: 1, duration: 0.5, ease: "power3.out" }, 0.3);
-  tl.fromTo("#${id}-h", { y: 30, opacity: 0 }, { y: 0, opacity: 1, duration: 0.6, ease: "power3.out" }, 0.45);
-${s.bullets.map((_, i) => `  tl.fromTo("#${id}-b${i}", { x: -24, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: "power2.out" }, ${times[i]});`).join('\n')}`;
-  return shell(id, ctx.canvas, css, body, script, ctx);
+${mk.tween}
+${entrance(st, `#${id}-h`, 0.45, { distance: 30 })}
+${s.bullets.map((_, i) => entrance(st, `#${id}-b${i}`, times[i], { distance: 24, dur: st.motion.dur * 0.75 })).join('\n')}`;
+  return shell(id, ctx.canvas, css, body, script, st);
 }
 
 const logoHtml = (id, ctx, narrow) => (ctx.logoFile ? `<img id="${id}-logo" src="${escRaw(ctx.logoFile)}" alt="" style="max-height: ${narrow ? 90 : 130}px; max-width: ${narrow ? 360 : 520}px; margin-bottom: 36px; object-fit: contain;" />` : '');
 const logoTween = (id, ctx) => (ctx.logoFile ? `  tl.fromTo("#${id}-logo", { y: 20, opacity: 0, scale: 0.92 }, { y: 0, opacity: 1, scale: 1, duration: 0.7, ease: "power3.out" }, 0.05);` : '');
 
 function title(id, s, ctx) {
+  const st = ctx.style;
   const sub = s.bullets[0] ?? '';
   const narrow = ctx.canvas.width < 1000;
+  const mk = marker(st, id);
+  const align = narrow || st.id === 'editorial' ? 'flex-start' : 'center';
   const css = `
-  #${id}-box { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: ${narrow ? 'flex-start' : 'center'}; justify-content: center; text-align: ${narrow ? 'left' : 'center'}; }
-  #${id}-bar { width: 140px; height: 10px; border-radius: 5px; background: ${ctx.palette.accent}; margin-bottom: 40px; }
-  #${id}-h { margin: 0; font-size: ${narrow ? 68 : 118}px; font-weight: 800; line-height: 1.04; max-width: ${ctx.canvas.width - (narrow ? 0 : 80)}px; }
-  #${id}-s { margin-top: 34px; font-size: ${narrow ? 36 : 48}px; font-weight: 500; opacity: 0.85; }`;
-  const body = `<div id="${id}-box">${ctx.logoFile ? logoHtml(id, ctx, narrow) : `<div id="${id}-bar"></div>`}<h1 id="${id}-h">${esc(s.headline)}</h1>${sub ? `<div id="${id}-s">${esc(sub)}</div>` : ''}</div>`;
-  const script = `${ctx.logoFile ? logoTween(id, ctx) : `  tl.fromTo("#${id}-bar", { scaleX: 0 }, { scaleX: 1, duration: 0.6, ease: "power3.out" }, 0.1);`}
-  tl.fromTo("#${id}-h", { y: 50, opacity: 0, scale: 0.96 }, { y: 0, opacity: 1, scale: 1, duration: 0.8, ease: "power3.out" }, 0.25);
-${sub ? `  tl.fromTo("#${id}-s", { y: 24, opacity: 0 }, { y: 0, opacity: 0.85, duration: 0.6, ease: "power2.out" }, 0.8);` : ''}`;
-  return shell(id, ctx.canvas, css, body, script, ctx);
+  #${id}-box { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: ${align}; justify-content: center; text-align: ${align === 'center' ? 'center' : 'left'}; }
+  ${mk.css}
+  #${id}-h { margin: 0; ${headCss(st, narrow ? 68 : 118)} max-width: ${ctx.canvas.width - (narrow ? 0 : 80)}px; }
+  #${id}-s { margin-top: 34px; font-size: ${narrow ? 36 : 48}px; font-weight: 500; color: ${st.palette.muted}; }`;
+  const body = `<div id="${id}-box">${ctx.logoFile ? logoHtml(id, ctx, narrow) : mk.html}<h1 id="${id}-h">${esc(s.headline)}</h1>${sub ? `<div id="${id}-s">${esc(sub)}</div>` : ''}</div>`;
+  const script = [ctx.logoFile ? logoTween(id, ctx) : mk.tween, entrance(st, `#${id}-h`, 0.25, { distance: 50, dur: st.motion.dur * 1.15 }), sub ? entrance(st, `#${id}-s`, 0.8, { distance: 24 }) : ''].join('\n');
+  return shell(id, ctx.canvas, css, body, script, st);
 }
 
 function cta(id, s, ctx) {
+  const st = ctx.style;
   const button = s.bullets[0] || 'Get started';
   const narrow = ctx.canvas.width < 1000;
+  const btnRadius = st.card.radius === 0 ? 0 : 999;
   const css = `
   #${id}-box { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: ${narrow ? 'flex-start' : 'center'}; justify-content: center; text-align: ${narrow ? 'left' : 'center'}; }
-  #${id}-h { margin: 0; font-size: ${narrow ? 64 : 104}px; font-weight: 800; line-height: 1.05; max-width: ${ctx.canvas.width - (narrow ? 0 : 80)}px; }
-  #${id}-btn { margin-top: ${narrow ? 40 : 56}px; padding: ${narrow ? '20px 44px' : '26px 64px'}; border-radius: 999px; background: ${ctx.palette.accent}; color: ${ctx.palette.bg}; font-size: ${narrow ? 36 : 46}px; font-weight: 800; transform-origin: ${narrow ? 'left center' : 'center'}; }
-  #${id}-sub { margin-top: ${narrow ? 22 : 30}px; font-size: ${narrow ? 30 : 38}px; opacity: 0.8; }`;
+  #${id}-h { margin: 0; ${headCss(st, narrow ? 64 : 104)} max-width: ${ctx.canvas.width - (narrow ? 0 : 80)}px; }
+  #${id}-btn { margin-top: ${narrow ? 40 : 56}px; padding: ${narrow ? '20px 44px' : '26px 64px'}; border-radius: ${btnRadius}px; background: ${st.palette.accent}; color: ${st.palette.onAccent}; font-size: ${narrow ? 36 : 46}px; font-weight: 800; font-family: "${st.font.display}", sans-serif; text-transform: ${st.font.headCase}; transform-origin: ${narrow ? 'left center' : 'center'};${st.marker === 'glow' ? ` box-shadow: 0 0 40px ${st.palette.accent};` : ''}${st.card.radius === 0 ? ' box-shadow: 8px 8px 0 #000000;' : ''} }
+  #${id}-sub { margin-top: ${narrow ? 22 : 30}px; font-size: ${narrow ? 30 : 38}px; color: ${st.palette.muted}; }`;
   const body = `<div id="${id}-box">${logoHtml(id, ctx, narrow)}<h1 id="${id}-h">${esc(s.headline)}</h1><div id="${id}-btn">${esc(button)}</div>${s.bullets[1] ? `<div id="${id}-sub">${esc(s.bullets[1])}</div>` : ''}</div>`;
   const script = `${logoTween(id, ctx)}
-  tl.fromTo("#${id}-h", { y: 40, opacity: 0 }, { y: 0, opacity: 1, duration: 0.7, ease: "power3.out" }, 0.2);
-  tl.fromTo("#${id}-btn", { scale: 0.7, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.6, ease: "back.out(1.8)" }, 0.8);
+${entrance(st, `#${id}-h`, 0.2, { distance: 40 })}
+  tl.fromTo("#${id}-btn", { scale: 0.7, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.6, ease: "${st.motion.emph}" }, 0.8);
   tl.fromTo("#${id}-btn", { scale: 1 }, { scale: 1.05, duration: 0.5, ease: "sine.inOut", yoyo: true, repeat: 3 }, 1.6);
-${s.bullets[1] ? `  tl.fromTo("#${id}-sub", { opacity: 0 }, { opacity: 0.8, duration: 0.6 }, 1.2);` : ''}`;
-  return shell(id, ctx.canvas, css, body, script, ctx);
+${s.bullets[1] ? `  tl.fromTo("#${id}-sub", { opacity: 0 }, { opacity: 1, duration: 0.6 }, 1.2);` : ''}`;
+  return shell(id, ctx.canvas, css, body, script, st);
 }
 
 const BUILDERS = { bullets, stat, steps, compare, statement, showcase, title, cta };
@@ -260,11 +282,21 @@ export function layoutFits(layout, scene) {
  * Build a scene's graphics file.
  * @param {string} compId
  * @param {object} scene  normalized plan scene (layout + content)
- * @param {{palette, font, duration, canvas:{width,height}, words?, mediaFile?, logoFile?}} ctx
+ * @param {{style?, palette, font, duration, canvas:{width,height}, words?, mediaFile?, logoFile?}} ctx
+ *   style: a resolveStyle() result; derived from palette/font when absent.
  */
 export function buildLayoutHtml(compId, scene, ctx) {
   let layout = LAYOUTS.includes(scene.layout) && layoutFits(scene.layout, scene) ? scene.layout : defaultLayout(scene);
   if (layout === 'showcase' && !ctx.mediaFile) layout = 'bullets';
   if (scene.media && ctx.mediaFile && layout !== 'showcase' && scene.type === 'narrated') layout = 'showcase';
-  return BUILDERS[layout](compId, scene, { ...ctx, words: ctx.words ?? [] });
+  const style = ctx.style ?? legacyStyle(ctx);
+  return BUILDERS[layout](compId, scene, { ...ctx, style, words: ctx.words ?? [] });
+}
+
+/** Pre-style callers (and tests) pass palette/font only → Midnight with that palette/font. */
+function legacyStyle({ palette = {}, font = 'Inter' }) {
+  const st = resolveStyle({ style: 'midnight', palette });
+  st.palette = { ...st.palette, ...(palette.text ? { text: palette.text } : {}), ...(palette.bg ? { bg: palette.bg } : {}) };
+  st.font = { ...st.font, display: font, body: font };
+  return st;
 }

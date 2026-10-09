@@ -30,6 +30,7 @@ import { TALKING_HEAD_NEEDS } from '../talkingHeadClient.js';
 import { layoutTimeline, buildIndexHtml, fallbackSceneHtml, alignScriptWords } from './timeline.js';
 import { writeScenes } from './sceneWriter.js';
 import { researchBrief, describeImages } from './research.js';
+import { resolveStyle } from './styles.js';
 import { assertRuntime, checkProject, renderProject, transcribe, GSAP_JS } from './hyperframesCli.js';
 
 export const EXPLAINERS_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'data', 'explainers');
@@ -147,6 +148,7 @@ const logoOf = (ctx) => ctx.images?.find(i => i.kind === 'logo')?.file;
 
 function writeComposition(dir, plan, assets, { musicFile, portraitFile, logoFile }) {
   const slots = layoutTimeline(plan.scenes, assets);
+  const style = resolveStyle(plan);
   // Project metadata HyperFrames Studio shows (name) and uses (asset paths).
   writeFileSync(join(dir, 'meta.json'), JSON.stringify({ id: dir.split('/').pop(), name: plan.title }, null, 2));
   if (!existsSync(join(dir, 'hyperframes.json'))) {
@@ -155,7 +157,7 @@ function writeComposition(dir, plan, assets, { musicFile, portraitFile, logoFile
   writeFileSync(join(dir, 'index.html'), buildIndexHtml(plan, assets, { musicFile, portraitFile }));
   plan.scenes.forEach((scene, i) => {
     writeFileSync(join(dir, 'compositions', `scene-${i}.html`), fallbackSceneHtml(`scene-${i}`, scene, {
-      palette: plan.palette, font: plan.font, duration: slots[i].duration, words: assets[i].words ?? [],
+      style, palette: plan.palette, font: plan.font, duration: slots[i].duration, words: assets[i].words ?? [],
       mediaFile: assets[i].mediaFile, logoFile: (scene.type === 'title' || scene.type === 'outro') ? logoFile : undefined,
     }));
   });
