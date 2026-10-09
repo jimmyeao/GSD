@@ -34,6 +34,7 @@ Use headings, bullet points, and suggest diagrams where helpful.`,
 
   AssistantAgent: {
     model: 'general',
+    noThink: true, // everyday chat: ~0.5s to first token vs 8-16s with Qwen3.6 thinking
     systemPrompt: `You are AssistantAgent, a helpful IT systems generalist.
 Answer questions about Windows, Linux, networking, cloud, and IT operations clearly.
 Use plain English unless the user asks for technical depth.`,
