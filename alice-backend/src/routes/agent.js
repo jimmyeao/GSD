@@ -48,7 +48,8 @@ import { ensureComfyRunning, freeComfyMemory } from '../comfyManager.js';
 import { generateCrowd, MAX_CROWD_COUNT } from '../agents/crowdClient.js';
 import { generateMesh3D } from '../agents/mesh3dClient.js';
 import { generateMusic, generateSfx } from '../agents/musicClient.js';
-import { generateTalkingHead } from '../agents/talkingHeadClient.js';
+import { generateTalkingHead, TALKING_HEAD_NEEDS } from '../agents/talkingHeadClient.js';
+import { acquireWorker } from '../comfyWorkers.js';
 import { runExplainerPipeline, validateExplainerOptions } from '../agents/explainer/pipeline.js';
 
 const router = Router();
@@ -529,9 +530,12 @@ router.get('/mesh/:id/preview', (req, res) => {
 
 async function runTalkingHeadJob(id, opts) {
   const job = jobs.get(id);
+  // Prefer an idle remote GPU (no LLM pause); falls back to the local one.
+  const worker = await acquireWorker({ needs: TALKING_HEAD_NEEDS, label: 'talking-head' }).catch((err) => { job.status = 'error'; job.error = err.message; job.isOffline = isOfflineError(err); return null; });
+  if (!worker) return;
   try {
-    await ensureComfyRunning();
-    const vidData = await generateTalkingHead(config.models.comfyui.endpoint, opts);
+    job.worker = worker.name;
+    const vidData = await generateTalkingHead(worker.endpoint, { ...opts, ckpt: worker.files[0] });
     const cachedPath = join(VIDEOS_DIR, vidData.filename);
     const buffer = readFileSync(cachedPath);
     try { unlinkSync(cachedPath); } catch { /* not fatal — file just lingers */ }
@@ -542,7 +546,7 @@ async function runTalkingHeadJob(id, opts) {
     job.error = err.message;
     job.isOffline = isOfflineError(err);
   } finally {
-    freeComfyMemory();
+    await worker.release();
   }
 }
 

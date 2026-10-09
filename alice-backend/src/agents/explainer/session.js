@@ -94,7 +94,8 @@ export function storyboardMarkdown(plan, slots, ctx) {
   const lines = [
     `### Storyboard — ${plan.title}`,
     `~${Math.round(total)}s · ${plan.scenes.length} scenes · font ${plan.font} · palette ${plan.palette.bg} / ${plan.palette.accent}`,
-    plan.presenter ? `**Presenter:** ${plan.presenter.description}` : '**Presenter:** none (voiceover only)',
+    plan.presenter ? `**Presenter:** ${plan.presenter.description} (${plan.presenter.gender ?? 'female'} voice)` : '**Presenter:** none (voiceover only)',
+    ...(plan.removedClaims?.length ? [`⚠ Removed claims not found in the brief or website: ${plan.removedClaims.map(c => `"${c}"`).join(', ')} — tell me if any of them are real and I'll put them back.`] : []),
     `**Music:** ${plan.music.prompt}`,
     '',
     '| # | At | Layout | On screen | Visual | Voiceover |',

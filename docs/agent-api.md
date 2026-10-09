@@ -512,6 +512,17 @@ HyperFrames Studio, or re-rendered after editing `plan.json` without
 regenerating any media via `recomposeExplainer(<job_id>)` in
 `src/agents/explainer/pipeline.js` (~25s).
 
+### Remote GPU workers
+
+`COMFY_REMOTE_WORKERS=name=url[,name2=url2]` (in `alice-backend/.env`) adds
+always-on ComfyUI machines, e.g. `laptop=http://192.168.0.144:8188`.
+Presenter clips (`/agent/talking-head` and explainer presenter scenes) go
+to the first one that is reachable, idle, and has the required model files
+(read from its `/object_info`; BF16 or fp8 LTX-2.3 checkpoint), otherwise
+they run on the local GPU. Jobs on a remote worker don't pause the local
+LLM, and in explainers they run in parallel with the local GPU's images/
+music/sfx. Source: `src/comfyWorkers.js`.
+
 ### HyperFrames Studio (web editor)
 
 Finished videos in the web UI's Explainer conversations include an **Open

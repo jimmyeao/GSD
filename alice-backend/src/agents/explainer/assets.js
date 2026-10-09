@@ -43,8 +43,10 @@ const BACKGROUND_SUFFIX = ', atmospheric background photograph, soft focus, shal
 const PRESENTER_SOUNDS = 'Clear, warm, confident voice, moderate volume, close to the microphone. Quiet room tone.';
 
 /** Kokoro voice for the presenter/narrator when the caller didn't pick one. */
-export function pickVoice(presenterDescription = '') {
-  return /\b(man|male|he|his|him|guy|gentleman|father|boy)\b/i.test(presenterDescription) ? 'bm_george' : 'bf_alice';
+export function pickVoice(presenter) {
+  if (presenter?.gender) return presenter.gender === 'male' ? 'bm_george' : 'bf_alice';
+  const d = typeof presenter === 'string' ? presenter : (presenter?.description ?? '');
+  return /\b(man|male|he|his|him|guy|gentleman|father|boy)\b/i.test(d) ? 'bm_george' : 'bf_alice';
 }
 
 /** Presenter clip length from the Kokoro read of the same line (+ breathing room). */
@@ -81,7 +83,7 @@ function dropCache(kind, filename) {
  *   { ttsFile, ttsDur, voiceFile?, voiceDur?, clipSeconds?, mediaFile? }
  */
 export async function voicePhase(dir, plan, { voice, images = [], onProgress = () => {} }) {
-  const chosen = voice || pickVoice(plan.presenter?.description);
+  const chosen = voice || pickVoice(plan.presenter);
   const lexicon = loadLexicon(plan.pronunciations);
   const ttsLex = lexiconFor(lexicon, 'tts');
   const presenterLex = lexiconFor(lexicon, 'presenter');
@@ -125,24 +127,64 @@ async function cached(dir, rel, make) {
 }
 
 /**
- * Phase 2: everything ComfyUI. Caller owns ensureComfyRunning()/freeComfyMemory().
+ * Presenter clips (LTX-2.3 ID-LoRA) on one worker. Mutates assets
+ * (clipFile/clipDur). Returns the scene indexes that failed, so the caller
+ * can retry them elsewhere (e.g. a remote worker went away mid-batch).
+ */
+export async function presenterPhase(dir, plan, assets, { endpoint, ckpt, workerName = 'local', portraitFile, voiceRefFile, seed, onProgress = () => {}, only }) {
+  const failed = [];
+  const portrait = { name: `portrait-${seed}.png`, dataUrl: dataUrl(readFileSync(join(dir, portraitFile)), 'image/png') };
+  const voiceRef = { name: `voiceref-${seed}.wav`, dataUrl: dataUrl(readFileSync(join(dir, voiceRefFile)), 'audio/wav') };
+  const live = (only ?? plan.scenes.map((s, i) => (s.type === 'presenter' ? i : -1))).filter(i => i >= 0 && plan.scenes[i].type === 'presenter');
+  for (const [k, i] of live.entries()) {
+    const scene = plan.scenes[i];
+    // Same cache key on every worker: a clip is a clip, wherever it was made.
+    const rel = `assets/presenter-${assetKey(assets[i].presenterSpoken, plan.presenter.description, assets[i].clipSeconds, seed, voiceRefFile)}.mp4`;
+    onProgress(existsSync(join(dir, rel)) ? `Presenter clip ${k + 1}/${live.length} (unchanged, reused)` : `Presenter clip ${k + 1}/${live.length} (${assets[i].clipSeconds}s) on ${workerName}…`);
+    try {
+      assets[i].clipFile = await cached(dir, rel, async () => {
+        const out = await generateTalkingHead(endpoint, {
+          portrait, voiceRef, visual: presenterVisual(plan.presenter.description),
+          speech: assets[i].presenterSpoken, sounds: PRESENTER_SOUNDS, seconds: assets[i].clipSeconds, seed, ckpt,
+        });
+        const buf = await fetchComfyOutput(endpoint, out);
+        dropCache('videos', out.filename);
+        return buf;
+      });
+      assets[i].clipDur = await probeDuration(join(dir, assets[i].clipFile));
+    } catch (err) {
+      onProgress(`⚠ presenter clip for scene ${i + 1} failed on ${workerName} (${err.message})`);
+      failed.push(i);
+    }
+  }
+  return failed;
+}
+
+/**
+ * Phase 2: everything ComfyUI except (optionally) presenter clips.
+ * The local GPU is only started (ensureLocal) if something here actually
+ * needs generating — fully cached revisions never pause the LLM.
  * Mutates `assets` (imageFile, clipFile, clipDur, sfxFile) and may demote
  * presenter scenes in `plan`.
  * @param {number} musicSeconds  final timeline length (known before this phase)
+ * @param {(portraitFile:string)=>void} onPortrait  called once the portrait exists (remote presenter clips start then)
+ * @param {boolean} presenters  also make presenter clips here (local GPU)
  * @returns {{musicFile?: string, portraitFile?: string, warnings: string[]}}
  */
-export async function comfyPhase(dir, plan, assets, { endpoint, voiceRefFile, musicSeconds, seed, onProgress = () => {} }) {
+export async function comfyPhase(dir, plan, assets, { endpoint, ensureLocal = async () => {}, voiceRefFile, musicSeconds, seed, onProgress = () => {}, presenters = true, onPortrait = () => {} }) {
   const warnings = [];
   const warn = (msg) => { warnings.push(msg); onProgress(`⚠ ${msg}`); };
   const presenterIdx = () => plan.scenes.map((s, i) => (s.type === 'presenter' ? i : -1)).filter(i => i >= 0);
+  const make = async (fn) => { await ensureLocal(); return fn(); };
 
   // ── Krea 2: portrait + narrated backgrounds ─────────────────────────
   let portraitFile;
   if (presenterIdx().length) {
     onProgress('Presenter portrait…');
     try {
-      portraitFile = await cached(dir, `assets/portrait-${assetKey(plan.presenter.description, seed)}.png`, async () =>
-        fetchComfyOutput(endpoint, await generateImage(endpoint, portraitPrompt(plan.presenter.description), '', 600_000, 'krea2', 'landscape')));
+      portraitFile = await cached(dir, `assets/portrait-${assetKey(plan.presenter.description, seed)}.png`, () => make(async () =>
+        fetchComfyOutput(endpoint, await generateImage(endpoint, portraitPrompt(plan.presenter.description), '', 600_000, 'krea2', 'landscape'))));
+      onPortrait(portraitFile);
     } catch (err) {
       warn(`presenter portrait failed (${err.message}) — presenter scenes become narrated`);
       presenterIdx().forEach(i => demote(plan, assets, i));
@@ -153,38 +195,18 @@ export async function comfyPhase(dir, plan, assets, { endpoint, voiceRefFile, mu
     onProgress(`Background image ${k + 1}/${backgrounds.length}…`);
     try {
       const prompt = `${plan.scenes[i].image_prompt}${BACKGROUND_SUFFIX}`;
-      assets[i].imageFile = await cached(dir, `assets/bg-${assetKey(prompt)}.png`, async () =>
-        fetchComfyOutput(endpoint, await generateImage(endpoint, prompt, '', 600_000, 'krea2', 'landscape')));
+      assets[i].imageFile = await cached(dir, `assets/bg-${assetKey(prompt)}.png`, () => make(async () =>
+        fetchComfyOutput(endpoint, await generateImage(endpoint, prompt, '', 600_000, 'krea2', 'landscape'))));
     } catch (err) {
       warn(`image for scene ${i + 1} failed (${err.message}) — using a gradient`);
     }
   }
 
-  // ── LTX-2.3 ID-LoRA: presenter clips ────────────────────────────────
-  if (portraitFile) {
-    const portrait = { name: `portrait-${seed}.png`, dataUrl: dataUrl(readFileSync(join(dir, portraitFile)), 'image/png') };
-    const voiceRef = { name: `voiceref-${seed}.wav`, dataUrl: dataUrl(readFileSync(join(dir, voiceRefFile)), 'audio/wav') };
-    const live = presenterIdx();
-    for (const [k, i] of live.entries()) {
-      const scene = plan.scenes[i];
-      const rel = `assets/presenter-${assetKey(assets[i].presenterSpoken, plan.presenter.description, assets[i].clipSeconds, seed, voiceRefFile)}.mp4`;
-      onProgress(existsSync(join(dir, rel)) ? `Presenter clip ${k + 1}/${live.length} (unchanged, reused)` : `Presenter clip ${k + 1}/${live.length} (${assets[i].clipSeconds}s, ~6 min)…`);
-      try {
-        assets[i].clipFile = await cached(dir, rel, async () => {
-          const out = await generateTalkingHead(endpoint, {
-            portrait, voiceRef, visual: presenterVisual(plan.presenter.description),
-            speech: assets[i].presenterSpoken, sounds: PRESENTER_SOUNDS, seconds: assets[i].clipSeconds, seed,
-          });
-          const buf = await fetchComfyOutput(endpoint, out);
-          dropCache('videos', out.filename);
-          return buf;
-        });
-        assets[i].clipDur = await probeDuration(join(dir, assets[i].clipFile));
-      } catch (err) {
-        warn(`presenter clip for scene ${i + 1} failed (${err.message}) — narrating it instead`);
-        demote(plan, assets, i);
-      }
-    }
+  // ── LTX-2.3 ID-LoRA presenter clips, when they're made locally ───────
+  if (presenters && portraitFile) {
+    await ensureLocal();
+    const failed = await presenterPhase(dir, plan, assets, { endpoint, portraitFile, voiceRefFile, seed, onProgress });
+    for (const i of failed) { warn(`presenter clip for scene ${i + 1} failed — narrating it instead`); demote(plan, assets, i); }
   }
 
   // ── ACE-Step: music bed ─────────────────────────────────────────────
@@ -192,12 +214,12 @@ export async function comfyPhase(dir, plan, assets, { endpoint, voiceRefFile, mu
   const seconds = Math.ceil(musicSeconds) + 1;
   onProgress(`Music bed (${seconds}s)…`);
   try {
-    musicFile = await cached(dir, `assets/music-${assetKey(plan.music.prompt, seconds)}.flac`, async () => {
+    musicFile = await cached(dir, `assets/music-${assetKey(plan.music.prompt, seconds)}.flac`, () => make(async () => {
       const out = await generateMusic(endpoint, plan.music.prompt, '', seconds, 600_000);
       const buf = await fetchComfyOutput(endpoint, out);
       dropCache('audio', out.filename);
       return buf;
-    });
+    }));
   } catch (err) {
     warn(`music failed (${err.message}) — no music bed`);
   }
@@ -206,17 +228,17 @@ export async function comfyPhase(dir, plan, assets, { endpoint, voiceRefFile, mu
   for (const [i, scene] of plan.scenes.entries()) {
     if (!scene.sfx) continue;
     try {
-      assets[i].sfxFile = await cached(dir, `assets/sfx-${assetKey(scene.sfx)}.flac`, async () => {
+      assets[i].sfxFile = await cached(dir, `assets/sfx-${assetKey(scene.sfx)}.flac`, () => make(async () => {
         onProgress(`Sound effect "${scene.sfx}"…`);
         const out = await generateSfx(endpoint, `${scene.sfx}, clean, short, no music`, 1.5, 300_000);
         const buf = await fetchComfyOutput(endpoint, out);
         dropCache('audio', out.filename);
         return buf;
-      });
+      }));
     } catch (err) {
       warn(`sound effect "${scene.sfx}" failed (${err.message})`);
     }
   }
 
-  return { musicFile, portraitFile, warnings };
+  return { musicFile, portraitFile, warnings, demote: (i) => demote(plan, assets, i) };
 }

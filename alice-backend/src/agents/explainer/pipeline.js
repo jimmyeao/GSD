@@ -24,7 +24,9 @@ import { config } from '../../config.js';
 import { ensureComfyRunning, freeComfyMemory } from '../../comfyManager.js';
 import { LLMUnavailableError, complete } from '../llmClient.js';
 import { planExplainer } from './planner.js';
-import { voicePhase, comfyPhase } from './assets.js';
+import { voicePhase, comfyPhase, presenterPhase } from './assets.js';
+import { remoteWorkerFor, resolveNeeds, workerModels } from '../../comfyWorkers.js';
+import { TALKING_HEAD_NEEDS } from '../talkingHeadClient.js';
 import { layoutTimeline, buildIndexHtml, fallbackSceneHtml, alignScriptWords } from './timeline.js';
 import { writeScenes } from './sceneWriter.js';
 import { researchBrief, describeImages } from './research.js';
@@ -189,12 +191,45 @@ export async function produceVideo(dir, plan, ctx, { voice, seed, creative = fal
   // from their Kokoro reads), so the music bed can be generated to length.
   const estimate = layoutTimeline(plan.scenes, assets.map(a => ({ ...a, clipDur: a.clipSeconds })));
   const musicSeconds = estimate.at(-1).start + estimate.at(-1).duration;
+  // Presenter clips go to an idle remote worker (laptop GPU) when one has
+  // the models — in parallel with the local GPU's work, and without pausing
+  // the LLM for them. The local GPU only starts if it has uncached work.
+  const hasPresenter = plan.scenes.some(s => s.type === 'presenter');
+  const remote = hasPresenter ? await remoteWorkerFor(TALKING_HEAD_NEEDS) : null;
+  let remoteRun = null;
+  let localStarted = false;
+  const ensureLocal = async () => { if (!localStarted) { localStarted = true; await ensureComfyRunning(); } };
   let media;
-  await ensureComfyRunning();
   try {
-    media = await comfyPhase(dir, plan, assets, { endpoint: config.models.comfyui.endpoint, voiceRefFile, musicSeconds, seed, onProgress });
+    media = await comfyPhase(dir, plan, assets, {
+      endpoint: config.models.comfyui.endpoint, ensureLocal, voiceRefFile, musicSeconds, seed, onProgress,
+      presenters: !remote,
+      onPortrait: (portraitFile) => {
+        if (!remote) return;
+        onProgress(`Presenter clips → ${remote.name} (runs alongside the rest)`);
+        remoteRun = (async () => {
+          const ckpt = resolveNeeds(TALKING_HEAD_NEEDS, await workerModels(remote.endpoint))[0];
+          return presenterPhase(dir, plan, assets, { endpoint: remote.endpoint, ckpt, workerName: remote.name, portraitFile, voiceRefFile, seed, onProgress });
+        })().catch((err) => { onProgress(`⚠ ${remote.name} failed (${err.message})`); return plan.scenes.map((sc, i) => (sc.type === 'presenter' ? i : -1)).filter(i => i >= 0); })
+          .then(failed => ({ failed, portraitFile }));
+      },
+    });
   } finally {
-    freeComfyMemory();
+    if (localStarted) freeComfyMemory();
+  }
+  if (remoteRun) {
+    const { failed, portraitFile } = await remoteRun;
+    if (failed.length) {
+      // Remote worker dropped out — finish those clips on the local GPU.
+      onProgress(`Retrying ${failed.length} presenter clip(s) locally…`);
+      await ensureComfyRunning();
+      try {
+        const still = await presenterPhase(dir, plan, assets, { endpoint: config.models.comfyui.endpoint, portraitFile, voiceRefFile, seed, onProgress, only: failed });
+        for (const i of still) { media.warnings.push(`presenter clip for scene ${i + 1} failed — narrated instead`); media.demote(i); }
+      } finally {
+        freeComfyMemory();
+      }
+    }
   }
 
   // Captions (CPU, while the LLM restarts): script words, whisper timing.

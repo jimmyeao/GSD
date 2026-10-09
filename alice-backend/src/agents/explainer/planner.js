@@ -10,6 +10,7 @@
 import { complete } from '../llmClient.js';
 import { LAYOUTS } from './layouts.js';
 import { cleanLexicon } from './pronounce.js';
+import { findUnsupportedClaims, describeIssues, scrubClaims } from './grounding.js';
 
 export const ALLOWED_FONTS = ['Inter', 'Montserrat', 'Poppins', 'Roboto', 'Outfit', 'Playfair Display'];
 export const SCENE_TYPES = ['title', 'presenter', 'narrated', 'outro'];
@@ -43,7 +44,7 @@ Schema:
   "title": string,
   "palette": { "bg": "#rrggbb", "text": "#rrggbb", "accent": "#rrggbb" },
   "font": one of ${JSON.stringify(ALLOWED_FONTS)},
-  "presenter": ${presenter ? '{ "description": string }  // one on-camera presenter: age, hair, clothing, setting — used to generate their portrait' : 'null'},
+  "presenter": ${presenter ? '{ "gender": "female" | "male", "description": string }  // one on-camera presenter: gender, age, hair, clothing, setting — used to generate their portrait AND pick their voice' : 'null'},
   "music": { "prompt": string },   // instrumental background bed: genre, instruments, mood, tempo
   "pronunciations": { "Word": "how it sounds" },  // only words the client has told you how to pronounce, e.g. {"Acme": "ack-mee"}; else {}
   "scenes": [
@@ -138,7 +139,7 @@ export async function revisePlan(llm, plan, feedback, ctx, { completeFn = comple
   for (let attempt = 0; attempt < 2; attempt++) {
     const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 8000, temperature: 0.4, signal: AbortSignal.timeout(300_000) });
     try {
-      const revised = normalizePlan(extractJson(reply), ctx);
+      const revised = await groundPlan(llm, normalizePlan(extractJson(reply), ctx), messages, reply, ctx, completeFn);
       revised.pronunciations = { ...(plan.pronunciations ?? {}), ...revised.pronunciations };
       return revised;
     } catch (err) {
@@ -232,7 +233,12 @@ export function normalizePlan(raw, { presenter, maxPresenterScenes, brief = '', 
   };
 
   const wantPresenter = presenter && maxPresenterScenes > 0;
-  const presenterDesc = str(raw.presenter?.description, 400);
+  let presenterDesc = str(raw.presenter?.description, 400);
+  // Face and voice must agree: an ungendered description once produced a
+  // male portrait speaking with the default female voice.
+  const described = /\b(woman|female|lady|girl|she|her)\b/i.test(presenterDesc) ? 'female' : /\b(man|male|gentleman|guy|boy|he|his)\b/i.test(presenterDesc) ? 'male' : null;
+  const presenterGender = ['female', 'male'].includes(raw.presenter?.gender) ? raw.presenter.gender : (described ?? 'female');
+  if (presenterDesc && !described) presenterDesc = `${presenterGender === 'male' ? 'a man' : 'a woman'}, ${presenterDesc}`;
   let presenterCount = 0;
 
   for (const [rawIndex, s] of (Array.isArray(raw.scenes) ? raw.scenes : []).entries()) {
@@ -286,7 +292,7 @@ export function normalizePlan(raw, { presenter, maxPresenterScenes, brief = '', 
   if (!plan.scenes.some(s => s.speech)) throw new Error('plan has no spoken scenes');
   if (plan.scenes[0].type !== 'title') plan.scenes.unshift({ type: 'title', layout: 'title', stat: null, steps: [], compare: null, media: '', speech: '', headline: plan.title, bullets: [], image_prompt: '', visual_idea: 'headline scales up and fades in', sfx: 'soft whoosh' });
   if (plan.scenes.at(-1).type !== 'outro') plan.scenes.push({ type: 'outro', layout: 'cta', stat: null, steps: [], compare: null, media: '', speech: '', headline: plan.title, bullets: [], image_prompt: '', visual_idea: 'headline fades in', sfx: '' });
-  if (presenterCount > 0) plan.presenter = { description: presenterDesc };
+  if (presenterCount > 0) plan.presenter = { description: presenterDesc, gender: presenterGender };
   return plan;
 }
 
@@ -294,13 +300,35 @@ export function normalizePlan(raw, { presenter, maxPresenterScenes, brief = '', 
  * Ask the LLM for a plan, retrying once with the parse error if the first
  * answer isn't usable JSON.
  */
+/**
+ * Ask the planner to fix claims the facts don't support (prices, codes,
+ * percentages, "free trial"…); scrub whatever it can't fix.
+ */
+export async function groundPlan(llm, plan, messages, reply, opts, completeFn = complete) {
+  const facts = [opts.brief, opts.sourceText, opts.answers].filter(Boolean).join('\n');
+  let issues = findUnsupportedClaims(plan, facts);
+  if (!issues.length) return plan;
+  messages.push({ role: 'assistant', content: reply }, { role: 'user', content: `These claims are NOT in the brief, source material or the client's answers — remove them, or replace them with facts that are:\n${describeIssues(issues)}\nReturn the complete corrected JSON.` });
+  try {
+    const fixed = normalizePlan(extractJson(await completeFn(llm.endpoint, llm.model, messages, { numPredict: 8000, temperature: 0.3, signal: AbortSignal.timeout(300_000) })), opts);
+    plan = fixed;
+    issues = findUnsupportedClaims(plan, facts);
+  } catch { /* keep the original plan and scrub it */ }
+  if (!issues.length) return plan;
+  const scrubbed = normalizePlan(scrubClaims(plan, issues), opts);
+  scrubbed.removedClaims = [...new Set(issues.map(x => x.claim))];
+  if (plan.pronunciations) scrubbed.pronunciations = { ...plan.pronunciations, ...scrubbed.pronunciations };
+  return scrubbed;
+}
+
 export async function planExplainer(llm, opts, { completeFn = complete } = {}) {
   const messages = buildPlannerPrompt(opts);
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
     const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 8000, temperature: 0.6, signal: AbortSignal.timeout(300_000) });
     try {
-      return normalizePlan(extractJson(reply), opts);
+      const plan = normalizePlan(extractJson(reply), opts);
+      return await groundPlan(llm, plan, messages, reply, opts, completeFn);
     } catch (err) {
       lastErr = err;
       messages.push({ role: 'assistant', content: reply || '(empty)' }, { role: 'user', content: `That was not a usable plan (${err.message}). Reply with ONLY the JSON object.` });

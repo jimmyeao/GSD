@@ -33,6 +33,16 @@ const LTX23_DISTILLED_LORA = 'ltx_2.3_22b_distilled_1.1_lora_dynamic_fro09_avg_r
 const LTX23_ID_LORA = 'ltx-2.3-id-lora-talkvid-3k.safetensors';
 const FPS = 25;
 
+/**
+ * Model files a ComfyUI worker needs for generateTalkingHead (for
+ * comfyWorkers.acquireWorker). The checkpoint entry lists alternatives:
+ * full BF16 (DGX Spark) or fp8 (24 GB laptop GPU).
+ */
+export const TALKING_HEAD_NEEDS = [
+  [LTX23_CKPT, 'ltx-2.3-22b-dev-fp8.safetensors'],
+  LTX23_TEXT_ENCODER, LTX23_UPSCALER, LTX23_DISTILLED_LORA, LTX23_ID_LORA,
+];
+
 /** LTX latent frame counts are 8k+1. */
 function framesForSeconds(seconds) {
   return Math.max(1, Math.round((seconds * FPS) / 8)) * 8 + 1;
@@ -46,16 +56,16 @@ export function buildIdLoraPrompt({ visual, speech, sounds }) {
 }
 
 function buildIdLoraWorkflow(prompt, imageName, refAudioName, {
-  seconds = 8, width = 1280, height = 720, seed = Math.floor(Math.random() * 2 ** 32),
+  seconds = 8, width = 1280, height = 720, seed = Math.floor(Math.random() * 2 ** 32), ckpt = LTX23_CKPT,
   negativePrompt = 'pc game, console game, video game, cartoon, childish, ugly',
   identityGuidance = 3,
 } = {}) {
   const frames = framesForSeconds(seconds);
   return {
     // ── Loaders ─────────────────────────────────────────────────
-    '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: LTX23_CKPT } },
-    '2': { class_type: 'LTXAVTextEncoderLoader', inputs: { text_encoder: LTX23_TEXT_ENCODER, ckpt_name: LTX23_CKPT, device: 'default' } },
-    '3': { class_type: 'LTXVAudioVAELoader', inputs: { ckpt_name: LTX23_CKPT } },
+    '1': { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: ckpt } },
+    '2': { class_type: 'LTXAVTextEncoderLoader', inputs: { text_encoder: LTX23_TEXT_ENCODER, ckpt_name: ckpt, device: 'default' } },
+    '3': { class_type: 'LTXVAudioVAELoader', inputs: { ckpt_name: ckpt } },
     '4': { class_type: 'LatentUpscaleModelLoader', inputs: { model_name: LTX23_UPSCALER } },
     '5': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['1', 0], lora_name: LTX23_DISTILLED_LORA, strength_model: 0.5 } },
     '6': { class_type: 'LoraLoaderModelOnly', inputs: { model: ['5', 0], lora_name: LTX23_ID_LORA, strength_model: 1 } },
@@ -115,16 +125,18 @@ function buildIdLoraWorkflow(prompt, imageName, refAudioName, {
  *   voiceRef   {name, dataUrl}  ~5s speech sample whose voice is cloned
  *   visual / speech / sounds   prompt sections (see buildIdLoraPrompt)
  *   seconds, width, height, seed, timeoutMs, onProgress
+ *   ckpt   LTX-2.3 checkpoint file (default full BF16; the 24 GB laptop
+ *          worker uses ltx-2.3-22b-dev-fp8.safetensors)
  * @returns {Promise<{filename, subfolder, type}>} same shape as videoClient's generators
  */
 export async function generateTalkingHead(endpoint, {
   portrait, voiceRef, visual, speech, sounds,
-  seconds = 8, width = 1280, height = 720, seed, timeoutMs = 1_800_000, onProgress,
+  seconds = 8, width = 1280, height = 720, seed, timeoutMs = 1_800_000, onProgress, ckpt,
 }) {
   const imageName = await uploadMediaToComfy(endpoint, portrait.dataUrl, portrait.name);
   const refAudioName = await uploadMediaToComfy(endpoint, voiceRef.dataUrl, voiceRef.name);
   const prompt = buildIdLoraPrompt({ visual, speech, sounds });
-  const workflow = buildIdLoraWorkflow(prompt, imageName, refAudioName, { seconds, width, height, ...(seed !== undefined ? { seed } : {}) });
+  const workflow = buildIdLoraWorkflow(prompt, imageName, refAudioName, { seconds, width, height, ...(seed !== undefined ? { seed } : {}), ...(ckpt ? { ckpt } : {}) });
 
   const clientId = `alice-talkinghead-${Date.now()}`;
   const promptId = await queueWorkflow(endpoint, workflow, clientId);
