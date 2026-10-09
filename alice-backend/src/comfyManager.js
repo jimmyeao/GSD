@@ -38,7 +38,7 @@ import { config } from './config.js';
 
 const LITELLM_DIR = '/home/jimmy/litellm';
 const VLLM_LAGUNA = { name: 'alice-vllm-laguna', port: 8765 };
-const LLM_RESTART_HEALTH_TIMEOUT = 300_000; // cap while waking vllm-laguna back up (cold model load, not just a process start)
+const LLM_RESTART_HEALTH_TIMEOUT = 600_000; // Qwen3.6 cold load measured 451s; cap while waking vllm-laguna back up (cold model load, not just a process start)
 
 function runCmd(cmd, args) {
   return new Promise((resolve) => {

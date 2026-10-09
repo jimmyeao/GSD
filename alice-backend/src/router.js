@@ -345,7 +345,10 @@ ${catalog}`;
     const result = await complete(llmEndpoint, model, [
       { role: 'system', content: systemMsg },
       { role: 'user', content: prompt },
-    ], { signal: AbortSignal.timeout(12_000) });
+    // noThink: a one-word classification gains nothing from reasoning, and
+    // Qwen3.6 with thinking on burns the whole 300-token budget before
+    // answering (→ silent AssistantAgent fallback on every LLM-routed turn).
+    ], { signal: AbortSignal.timeout(12_000), noThink: true });
 
     const raw = result.trim();
     // Exact-match path (model obeyed "reply with ONLY the agent name").

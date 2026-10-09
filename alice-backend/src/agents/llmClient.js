@@ -3,13 +3,15 @@
  *
  * All Alice model roles (general/coder/mail) are served behind a LiteLLM
  * gateway in front of vLLM, which only speaks OpenAI-compat — there is no
- * Ollama-native /api/chat endpoint anymore. `opts.noThink` now maps to
- * `reasoning_effort: 'low'` in the request body (vLLM's reasoning-capable
- * backends read this as an extra field; harmless to send even if a given
- * backend ignores it).
+ * Ollama-native /api/chat endpoint anymore. `opts.noThink` maps to both
+ * `reasoning_effort: 'low'` (gpt-oss family) and Qwen3's
+ * `chat_template_kwargs.enable_thinking: false` (the only switch Qwen3.6
+ * honours — it ignores reasoning_effort). Each backend ignores the other's.
  */
 
 import { config } from '../config.js';
+
+const NO_THINK = { reasoning_effort: 'low', chat_template_kwargs: { enable_thinking: false } };
 
 function authHeaders() {
   const headers = { 'Content-Type': 'application/json' };
@@ -40,7 +42,7 @@ async function* streamOpenAICompat(endpoint, model, messages, opts) {
     temperature: opts.temperature ?? 0.7,
     // Qwen3 consumes tokens on reasoning before content — use a high ceiling
     max_tokens: opts.maxTokens ?? 8192,
-    ...(opts.noThink ? { reasoning_effort: 'low' } : {}),
+    ...(opts.noThink ? NO_THINK : {}),
   });
 
   const response = await fetchOrThrow(url, body, opts.signal);
@@ -99,7 +101,7 @@ export async function completeWithTools(endpoint, model, messages, opts = {}) {
     stream: false,
     temperature: opts.temperature ?? 0.4,
     max_tokens: opts.numPredict ?? 2048,
-    ...(opts.noThink ? { reasoning_effort: 'low' } : {}),
+    ...(opts.noThink ? NO_THINK : {}),
   };
   if (Array.isArray(opts.tools) && opts.tools.length) {
     body.tools = opts.tools;
@@ -257,7 +259,7 @@ export async function complete(endpoint, model, messages, opts = {}) {
         // non-reasoning routing model) leaves 0 room and returns empty content
         // on every call against Qwen3.6/Nemotron. 300 gave a reliable margin.
         max_tokens: opts.numPredict ?? 300,
-        ...(opts.noThink ? { reasoning_effort: 'low' } : {}),
+        ...(opts.noThink ? NO_THINK : {}),
       }),
       signal: opts.signal,
     });
