@@ -22,6 +22,7 @@ const PROBE_TIMEOUT_MS = 3_000;
 const MODEL_LISTS = {
   UNETLoader: 'unet_name', CheckpointLoaderSimple: 'ckpt_name', LoraLoaderModelOnly: 'lora_name',
   CLIPLoader: 'clip_name', VAELoader: 'vae_name', LatentUpscaleModelLoader: 'model_name', UpscaleModelLoader: 'model_name',
+  AudioEncoderLoader: 'audio_encoder_name',
 };
 
 export function parseRemoteWorkers(spec = process.env.COMFY_REMOTE_WORKERS ?? '') {
