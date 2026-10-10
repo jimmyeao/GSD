@@ -25,6 +25,7 @@ import { ensureComfyRunning, freeComfyMemory } from '../../comfyManager.js';
 import { LLMUnavailableError, complete } from '../llmClient.js';
 import { planExplainer } from './planner.js';
 import { voicePhase, comfyPhase, presenterPhase } from './assets.js';
+import { focusPhase } from './focus.js';
 import { remoteWorkerFor, resolveNeeds, workerModels } from '../../comfyWorkers.js';
 import { TALKING_HEAD_NEEDS } from '../talkingHeadClient.js';
 import { layoutTimeline, buildIndexHtml, fallbackSceneHtml, alignScriptWords } from './timeline.js';
@@ -158,7 +159,8 @@ function writeComposition(dir, plan, assets, { musicFile, portraitFile, logoFile
   plan.scenes.forEach((scene, i) => {
     writeFileSync(join(dir, 'compositions', `scene-${i}.html`), fallbackSceneHtml(`scene-${i}`, scene, {
       style, palette: plan.palette, font: plan.font, duration: slots[i].duration, words: assets[i].words ?? [],
-      mediaFile: assets[i].mediaFile, logoFile: (scene.type === 'title' || scene.type === 'outro') ? logoFile : undefined,
+      mediaFile: assets[i].mediaFile, mediaSize: assets[i].mediaSize, mediaFocus: assets[i].mediaFocus,
+      logoFile: (scene.type === 'title' || scene.type === 'outro') ? logoFile : undefined,
     }));
   });
   return slots;
@@ -171,6 +173,7 @@ function writeComposition(dir, plan, assets, { musicFile, portraitFile, logoFile
  */
 export async function makeAnimatic(dir, plan, ctx, { voice, portraitFile } = {}, onProgress = () => {}) {
   const { assets } = await voicePhase(dir, plan, { voice, images: ctx.images, onProgress });
+  await focusPhase(dir, plan, assets, { onProgress });
   for (const [i, scene] of plan.scenes.entries()) {
     const a = assets[i];
     if (scene.type === 'presenter') { a.clipDur = a.clipSeconds; a.voiceFile = a.ttsFile; a.voiceDur = a.ttsDur; }
@@ -188,6 +191,8 @@ export async function makeAnimatic(dir, plan, ctx, { voice, portraitFile } = {},
  */
 export async function produceVideo(dir, plan, ctx, { voice, seed, creative = false } = {}, onProgress = () => {}) {
   const { assets, voiceRefFile } = await voicePhase(dir, plan, { voice, images: ctx.images, onProgress });
+  // Before ComfyUI starts: the vision model needs ~15 GB (cached after the animatic).
+  await focusPhase(dir, plan, assets, { onProgress });
 
   // Media — timeline length is known up front (presenter clips are sized
   // from their Kokoro reads), so the music bed can be generated to length.
@@ -260,7 +265,7 @@ export async function produceVideo(dir, plan, ctx, { voice, seed, creative = fal
     }, { onProgress });
     const logoFile = logoOf(ctx);
     const sceneInfo = slots.map((s, i) => ({
-      duration: s.duration, words: assets[i].words ?? [], mediaFile: assets[i].mediaFile,
+      duration: s.duration, words: assets[i].words ?? [], mediaFile: assets[i].mediaFile, mediaSize: assets[i].mediaSize, mediaFocus: assets[i].mediaFocus,
       logoFile: (plan.scenes[i].type === 'title' || plan.scenes[i].type === 'outro') ? logoFile : undefined,
     }));
     scenes = await withLLM(() => writeScenes(dir, plan, sceneInfo, { llm: explainerLLM(), check: checkProject, slots, onProgress }), { onProgress });

@@ -149,6 +149,14 @@ export async function transcribe(workDir, mediaFile) {
   }
 }
 
+/** Image/video pixel size via ffprobe. */
+export async function probeSize(file) {
+  const { code, stdout } = await run(FFPROBE, ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file], { timeoutMs: 30_000 });
+  const [width, height] = stdout.trim().split(',').map(Number);
+  if (code !== 0 || !(width > 0) || !(height > 0)) throw new Error(`ffprobe could not read size of ${file}`);
+  return { width, height };
+}
+
 /** Media duration in seconds via ffprobe. */
 export async function probeDuration(file) {
   const { code, stdout } = await run(FFPROBE, ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', file], { timeoutMs: 30_000 });

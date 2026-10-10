@@ -186,6 +186,31 @@ function statement(id, s, ctx) {
   return shell(id, ctx.canvas, css, body, script, st);
 }
 
+/**
+ * Pan/zoom tweens that move the screenshot to each bullet's region (from
+ * focus.js) as that bullet is revealed, then back out to the full view.
+ * Exported for tests. Returns '' when there are no usable targets.
+ */
+export function focusTweens(sel, { focus, size, times, width, duration }) {
+  if (!focus?.some(Boolean) || !size?.width || !size?.height) return '';
+  const W = width, H = width * size.height / size.width;
+  const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+  const keys = focus.map((f, i) => (f ? { f, at: Math.max(0.4, times[i] - 0.25) } : null)).filter(Boolean);
+  const out = [`  tl.fromTo("${sel}", { x: 0, y: 0, scale: 1 }, { x: 0, y: 0, scale: 1, duration: 0.01 }, 0);`];
+  keys.forEach(({ f, at }, k) => {
+    const S = clamp(0.8 * Math.min(1 / f.w, 1 / f.h), 1.25, 2.4);
+    const tx = clamp(W / 2 - (f.x + f.w / 2) * W * S, W * (1 - S), 0);
+    const ty = clamp(H / 2 - (f.y + f.h / 2) * H * S, H * (1 - S), 0);
+    const next = keys[k + 1]?.at ?? duration;
+    const dur = clamp(next - at - 0.1, 0.4, 0.9);
+    out.push(`  tl.to("${sel}", { x: ${r2(tx)}, y: ${r2(ty)}, scale: ${r2(S)}, duration: ${r2(dur)}, ease: "power2.inOut" }, ${r2(at)});`);
+  });
+  const lastAt = keys.at(-1).at;
+  const back = Math.max(lastAt + 1.6, duration - 1.3);
+  if (back + 0.8 <= duration - 0.1) out.push(`  tl.to("${sel}", { x: 0, y: 0, scale: 1, duration: 0.8, ease: "power2.inOut" }, ${r2(back)});`);
+  return out.join('\n');
+}
+
 function showcase(id, s, ctx) {
   const st = ctx.style;
   // Real product screenshot in a browser-style frame, text beside it.
@@ -193,6 +218,8 @@ function showcase(id, s, ctx) {
   const shotW = Math.round(ctx.canvas.width * 0.6);
   const mk = marker(st, id, 0.3);
   const light = st.mode === 'light';
+  // Zoom to each bullet's region when focus.js found them; else a slow push-in.
+  const zoom = focusTweens(`#${id}-img`, { focus: ctx.mediaFocus, size: ctx.mediaSize, times, width: shotW, duration: ctx.duration });
   const css = `
   #${id}-txt { position: absolute; left: 0; top: 0; bottom: 0; width: ${ctx.canvas.width - shotW - 60}px; display: flex; flex-direction: column; justify-content: center; }
   ${mk.css}
@@ -206,13 +233,13 @@ function showcase(id, s, ctx) {
   #${id}-chrome { height: 38px; display: flex; align-items: center; gap: 10px; padding-left: 18px; background: ${light ? '#ebe6dc' : '#2a2f3a'}; }
   .${id}-dotc { width: 13px; height: 13px; border-radius: 50%; }
   #${id}-viewport { position: relative; overflow: hidden; }
-  #${id}-img { display: block; width: 100%; height: auto; transform-origin: 50% 40%; }`;
+  #${id}-img { display: block; width: 100%; height: auto; transform-origin: ${zoom ? '0 0' : '50% 40%'}; }`;
   const body = `<div id="${id}-txt">${mk.html}<h1 id="${id}-h">${esc(s.headline)}</h1>
   <div id="${id}-list">${s.bullets.map((b, i) => `<div id="${id}-b${i}" class="${id}-item"><span class="${id}-dot"></span>${esc(b)}</div>`).join('')}</div></div>
   <div id="${id}-shot"><div id="${id}-win"><div id="${id}-chrome"><span class="${id}-dotc" style="background:#ff5f57"></span><span class="${id}-dotc" style="background:#febc2e"></span><span class="${id}-dotc" style="background:#28c840"></span></div>
   <div id="${id}-viewport" data-layout-allow-overflow><img id="${id}-img" src="${escRaw(ctx.mediaFile ?? '')}" alt="" /></div></div></div>`;
   const script = `  tl.fromTo("#${id}-win", { y: 60, opacity: 0, rotationY: -8, transformPerspective: 1600 }, { y: 0, opacity: 1, rotationY: 0, duration: 0.9, ease: "${st.motion.ease}" }, 0.1);
-  tl.fromTo("#${id}-img", { scale: 1.0 }, { scale: 1.06, duration: ${r2(Math.max(1, ctx.duration - 0.2))}, ease: "none" }, 0.2);
+${zoom || `  tl.fromTo("#${id}-img", { scale: 1.0 }, { scale: 1.06, duration: ${r2(Math.max(1, ctx.duration - 0.2))}, ease: "none" }, 0.2);`}
 ${mk.tween}
 ${entrance(st, `#${id}-h`, 0.45, { distance: 30 })}
 ${s.bullets.map((_, i) => entrance(st, `#${id}-b${i}`, times[i], { distance: 24, dur: st.motion.dur * 0.75 })).join('\n')}`;
@@ -283,7 +310,7 @@ export function layoutFits(layout, scene) {
  * Build a scene's graphics file.
  * @param {string} compId
  * @param {object} scene  normalized plan scene (layout + content)
- * @param {{style?, palette, font, duration, canvas:{width,height}, words?, mediaFile?, logoFile?}} ctx
+ * @param {{style?, palette, font, duration, canvas:{width,height}, words?, mediaFile?, mediaSize?, mediaFocus?, logoFile?}} ctx
  *   style: a resolveStyle() result; derived from palette/font when absent.
  */
 export function buildLayoutHtml(compId, scene, ctx) {
