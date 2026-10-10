@@ -63,7 +63,8 @@ export const NATIVE = {
   'grain-overlay': { role: 'overlay', id: 'grain' },
 };
 
-const EXCLUDE_TAGS = new Set(['vertical', 'social', 'social-overlay', 'map', 'podcast', 'interview', 'lower-third', 'broadcast', 'news', 'tiktok', 'instagram', 'reddit', 'twitter', 'spotify', 'youtube', 'ad-template', 'creator', 'camcorder', 'music', 'beat-driven', 'experiment', 'gaming', 'emoji', 'character', 'mascot']);
+// Non-native items Qwen can't adapt under the scene rules (no canvas/WebGL, no gsap plugins) are out too.
+const EXCLUDE_TAGS = new Set(['webgl', 'webgpu', 'webgpu-shader', 'html-in-canvas', 'liquid-glass-html-in-canvas', 'three-js', 'gltf', '3d-motion', 'canvas', 'gsap-plugin', 'motionpath', 'lottie', 'particles', 'vertical', 'social', 'social-overlay', 'map', 'podcast', 'interview', 'lower-third', 'broadcast', 'news', 'tiktok', 'instagram', 'reddit', 'twitter', 'spotify', 'youtube', 'ad-template', 'creator', 'camcorder', 'music', 'beat-driven', 'experiment', 'gaming', 'emoji', 'character', 'mascot']);
 const EXCLUDE_NAME = /^(transitions-|carousel-(circle|orbit|path|vision|text-circle)-[2-5]$|heygen|blue-sweater|apple-money|nyc-paris|north-korea|spain-map|us-map|world-map|vpn-|slack-|chatgpt|claude-exchange|ai-chat-reveal|message-thread|notes-reveal|notification-cascade|share-sheet)/;
 const INCLUDE_TAGS = new Set(['transition', 'transition-primitive', 'typography', 'text', 'text-effect', 'text-effects', 'reveal', 'product-demo', 'mock-ui', 'ui-props', 'cursor', 'camera', 'showcase', 'data', 'data-viz', 'chart', 'cta', 'end-card', 'brand', 'logo', 'title-card', 'handwritten', 'annotation', 'callout', 'highlight', 'overlay', 'effect', 'background', 'feature-tour', 'proof', 'stats', 'device', 'compare', 'shader', 'kinetic-type', 'motion-primitive']);
 
