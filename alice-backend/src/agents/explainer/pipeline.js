@@ -258,7 +258,11 @@ export async function produceVideo(dir, plan, ctx, { voice, seed, creative = fal
       const llm = explainerLLM();
       await complete(llm.endpoint, llm.model, [{ role: 'user', content: 'Reply with OK.' }], { numPredict: 200, signal: AbortSignal.timeout(60_000) });
     }, { onProgress });
-    const sceneInfo = slots.map((s, i) => ({ duration: s.duration, words: assets[i].words ?? [] }));
+    const logoFile = logoOf(ctx);
+    const sceneInfo = slots.map((s, i) => ({
+      duration: s.duration, words: assets[i].words ?? [], mediaFile: assets[i].mediaFile,
+      logoFile: (plan.scenes[i].type === 'title' || plan.scenes[i].type === 'outro') ? logoFile : undefined,
+    }));
     scenes = await withLLM(() => writeScenes(dir, plan, sceneInfo, { llm: explainerLLM(), check: checkProject, slots, onProgress }), { onProgress });
     scenes = scenes.map(s => ({ ...s, source: s.source === 'fallback' ? 'layout' : 'llm' }));
   }

@@ -200,7 +200,8 @@ function showcase(id, s, ctx) {
   #${id}-list { margin-top: 36px; display: flex; flex-direction: column; gap: 18px; }
   .${id}-item { display: flex; align-items: center; font-size: 36px; font-weight: 500; }
   ${bulletCss(st, `${id}-dot`, 16)}
-  #${id}-win { position: absolute; right: 0; top: 50%; margin-top: -${Math.round(shotW * 0.33)}px; width: ${shotW}px; border-radius: ${Math.min(18, st.card.radius || 0)}px; overflow: hidden;
+  #${id}-shot { position: absolute; right: 0; top: 0; bottom: 0; width: ${shotW}px; display: flex; align-items: center; }
+  #${id}-win { position: relative; width: ${shotW}px; border-radius: ${Math.min(18, st.card.radius || 0)}px; overflow: hidden;
     background: ${light ? '#ffffff' : '#1b1f27'}; box-shadow: ${st.panel.shadow}; border: ${light ? '1px solid rgba(0,0,0,0.15)' : '2px solid rgba(255,255,255,0.12)'}; }
   #${id}-chrome { height: 38px; display: flex; align-items: center; gap: 10px; padding-left: 18px; background: ${light ? '#ebe6dc' : '#2a2f3a'}; }
   .${id}-dotc { width: 13px; height: 13px; border-radius: 50%; }
@@ -208,8 +209,8 @@ function showcase(id, s, ctx) {
   #${id}-img { display: block; width: 100%; height: auto; transform-origin: 50% 40%; }`;
   const body = `<div id="${id}-txt">${mk.html}<h1 id="${id}-h">${esc(s.headline)}</h1>
   <div id="${id}-list">${s.bullets.map((b, i) => `<div id="${id}-b${i}" class="${id}-item"><span class="${id}-dot"></span>${esc(b)}</div>`).join('')}</div></div>
-  <div id="${id}-win"><div id="${id}-chrome"><span class="${id}-dotc" style="background:#ff5f57"></span><span class="${id}-dotc" style="background:#febc2e"></span><span class="${id}-dotc" style="background:#28c840"></span></div>
-  <div id="${id}-viewport"><img id="${id}-img" src="${escRaw(ctx.mediaFile ?? '')}" alt="" /></div></div>`;
+  <div id="${id}-shot"><div id="${id}-win"><div id="${id}-chrome"><span class="${id}-dotc" style="background:#ff5f57"></span><span class="${id}-dotc" style="background:#febc2e"></span><span class="${id}-dotc" style="background:#28c840"></span></div>
+  <div id="${id}-viewport" data-layout-allow-overflow><img id="${id}-img" src="${escRaw(ctx.mediaFile ?? '')}" alt="" /></div></div></div>`;
   const script = `  tl.fromTo("#${id}-win", { y: 60, opacity: 0, rotationY: -8, transformPerspective: 1600 }, { y: 0, opacity: 1, rotationY: 0, duration: 0.9, ease: "${st.motion.ease}" }, 0.1);
   tl.fromTo("#${id}-img", { scale: 1.0 }, { scale: 1.06, duration: ${r2(Math.max(1, ctx.duration - 0.2))}, ease: "none" }, 0.2);
 ${mk.tween}

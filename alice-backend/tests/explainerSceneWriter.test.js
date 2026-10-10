@@ -83,6 +83,16 @@ describe('writeScenes', () => {
     assert.match(readFileSync(join(dir, 'compositions/scene-2.html'), 'utf8'), /id="scene-2-h"/); // layout on disk
   });
 
+  it('keeps screenshot scenes on the showcase template with the image', async () => {
+    const shot = { ...plan, scenes: [{ type: 'narrated', layout: 'showcase', media: 'img1', headline: 'S', bullets: ['y'] }] };
+    let asked = 0;
+    const completeFn = async () => { asked++; return '<html>no template</html>'; };
+    const res = await writeScenes(dir, shot, [{ duration: 4, mediaFile: 'assets/media-img1.png' }], { llm: { endpoint: 'e', model: 'm' }, check: async () => ({ ok: true, findings: [] }), slots: [slots[1]], completeFn });
+    assert.equal(asked, 0);
+    assert.equal(res[0].source, 'fallback');
+    assert.match(readFileSync(join(dir, 'compositions/scene-0.html'), 'utf8'), /src="assets\/media-img1\.png"/);
+  });
+
   it('feeds check findings for that scene back to the model', async () => {
     let fixPrompt = '';
     const completeFn = async (_e, _m, messages) => {

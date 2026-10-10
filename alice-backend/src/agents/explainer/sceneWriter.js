@@ -166,7 +166,7 @@ function fixMessage(problems) {
  * Write compositions/scene-N.html for every scene.
  * @param {string} projectDir
  * @param {object} plan
- * @param {{duration:number, words?:object[]}[]} sceneInfo per scene
+ * @param {{duration:number, words?:object[], mediaFile?:string, logoFile?:string}[]} sceneInfo per scene
  * @param {{llm:{endpoint,model}, check:(dir)=>Promise<{findings}>, slots:{start,duration}[], onProgress?:fn, completeFn?:fn}} deps
  * @returns {Promise<{index:number, source:'llm'|'fallback', rounds:number}[]>}
  */
@@ -179,6 +179,10 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
     html: '',
   }));
   const file = (s) => join(projectDir, 'compositions', `${s.compId}.html`);
+  const fallback = (s) => {
+    const { duration, words, mediaFile, logoFile } = sceneInfo[s.index];
+    return fallbackSceneHtml(s.compId, s.scene, { style, palette, font, duration, words, mediaFile, logoFile });
+  };
   const ask = async (s) => {
     try {
       const reply = await completeFn(llm.endpoint, llm.model, s.messages, { numPredict: 12_000, temperature: 0.5, signal: AbortSignal.timeout(420_000) });
@@ -191,9 +195,11 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
   };
 
   // Every scene starts as the template, so the project always checks/renders.
-  for (const s of states) writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { style, palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
+  for (const s of states) writeFileSync(file(s), fallback(s));
 
-  let pending = states;
+  // Scenes showing an attached screenshot keep the showcase template: the
+  // LLM never sees the image, so its version would drop the screenshot.
+  let pending = states.filter(s => !sceneInfo[s.index].mediaFile);
   for (let round = 0; round <= MAX_FIX_ROUNDS && pending.length; round++) {
     onProgress(round === 0 ? `Writing graphics for ${pending.length} scene(s)…` : `Fixing ${pending.length} scene(s) (round ${round})…`);
     await Promise.all(pending.map(ask));
@@ -203,7 +209,7 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
     for (const s of pending) {
       s.rounds = round + 1;
       s.problems = staticCheck(s.html, s.compId, font, s.scene);
-      if (s.problems.length) writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { style, palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
+      if (s.problems.length) writeFileSync(file(s), fallback(s));
       else { writeFileSync(file(s), s.html); candidates.push(s); }
     }
     // One browser check per round covers every candidate scene at once.
@@ -215,7 +221,7 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
     }
     for (const s of pending) {
       if (s.problems.length) {
-        writeFileSync(file(s), fallbackSceneHtml(s.compId, s.scene, { style, palette, font, duration: sceneInfo[s.index].duration, words: sceneInfo[s.index].words }));
+        writeFileSync(file(s), fallback(s));
         if (s.llmError) {
           // Transient LLM failure (e.g. still restarting after ComfyUI) —
           // ask again next round with the same messages, not a fix request.
