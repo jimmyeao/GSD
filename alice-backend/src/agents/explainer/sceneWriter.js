@@ -55,7 +55,7 @@ Hard rules (violations are rejected):
 - Center with flexbox or inset, not translate(-50%,-50%).
 - No <img>, <video>, <audio>, <iframe>, <canvas>, no url(), no http links — text, divs, inline SVG and CSS gradients only.
 - No Math.random, Date, setTimeout, setInterval, requestAnimationFrame, repeat: -1.
-- Core gsap only: NO plugins (no text: tweens, SplitText, TextPlugin, ScrambleText, MotionPath, DrawSVG, registerPlugin). To animate words, wrap each word in its own <span> and tween the spans. For a counting number, tween a plain object and write Math.round(value) into textContent in onUpdate.
+- Core gsap only: NO plugins (no text: tweens, SplitText, TextPlugin, ScrambleText, MotionPath, DrawSVG, registerPlugin). To animate words, wrap each word in its own <span> and tween the spans — keep a real space between the word spans (…</span> <span…) or give them margin-right: 0.25em, otherwise the words render run together. For a counting number, tween a plain object and write Math.round(value) into textContent in onUpdate.
 - Text blocks must never overlap each other: give each block its own position (stack them with flexbox column + gap, or distinct top values).
 - No <br>. Elements you transform must be block or inline-block.
 - No emoji or emoticons anywhere. For icons, draw simple shapes with divs/CSS or inline SVG.
@@ -171,7 +171,9 @@ export function staticCheck(html, compId, font, scene = null, { logoFile, allowI
   if (!html) return ['no HTML file found in the reply'];
   if (scene) {
     // Every piece of planned on-screen text must actually be in the file.
-    const visible = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ')
+    // Inline tags (span/strong/em/b/i) add no space: word spans with nothing between them really do
+    // render as "Neverworryabout…", so that text must not count as present. Block tags separate words.
+    const visible = html.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<\/?(span|strong|em|b|i|mark)\b[^>]*>/gi, '').replace(/<[^>]+>/g, ' ')
       .replace(/&amp;/g, '&').replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"').replace(/\s+/g, ' ').toLowerCase();
     const missing = [scene.headline?.replace(/\*/g, ''), ...(scene.bullets ?? [])]
       .filter(Boolean).filter(t => !visible.includes(t.toLowerCase().replace(/\s+/g, ' ').trim()));
