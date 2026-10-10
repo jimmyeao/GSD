@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, copyFileSync, rmSync, readdirSync } from 'node:
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseBoxes, normaliseBox, matchBoxes, locateFocus } from '../src/agents/explainer/focus.js';
-import { focusTweens } from '../src/agents/explainer/layouts.js';
+import { focusTweens } from '../src/agents/explainer/showcase.js';
 
 describe('focus boxes', () => {
   it('parses the JSON array out of a fenced reply', () => {
@@ -65,5 +65,25 @@ describe('focusTweens', () => {
   });
   it('is empty without targets', () => {
     assert.equal(focusTweens('#s', { focus: [null], size: { width: 10, height: 10 }, times: [1], width: 100, duration: 5 }), '');
+  });
+});
+
+describe('limitVideoClips', () => {
+  it('stops a clip where the next clip used by another scene starts', async () => {
+    const { limitVideoClips } = await import('../src/agents/explainer/assets.js');
+    const images = [
+      { id: 'vid1', kind: 'video', file: 'v.mp4', start: 0, end: 4.7, endFrame: 'e1.png' },
+      { id: 'vid2', kind: 'video', file: 'v.mp4', start: 4.7, end: 7.2, endFrame: 'e2.png' },
+      { id: 'vid3', kind: 'video', file: 'v.mp4', start: 7.2, end: 13.4, endFrame: 'e3.png' },
+    ];
+    const assets = [
+      { mediaFile: 'v.mp4', mediaVideo: { start: 0, end: 4.7, total: 19 } },
+      {},
+      { mediaFile: 'v.mp4', mediaVideo: { start: 7.2, end: 13.4, total: 19 } },
+    ];
+    limitVideoClips(assets, images);
+    assert.equal(assets[0].mediaVideo.limit, 7.2);       // may run through vid2 (unused) but not into vid3
+    assert.equal(assets[0].mediaVideo.endFrame, 'e2.png');
+    assert.equal(assets[2].mediaVideo.limit, 19);
   });
 });

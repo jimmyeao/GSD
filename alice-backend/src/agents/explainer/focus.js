@@ -94,7 +94,11 @@ export async function locateFocus(dir, mediaFile, items, { fetchFn = fetch } = {
  * Never throws: a scene whose lookup fails just keeps the plain zoom.
  */
 export async function focusPhase(dir, plan, assets, { onProgress = () => {}, fetchFn } = {}) {
-  const todo = plan.scenes.map((s, i) => (assets[i].mediaFile && s.bullets?.length ? i : -1)).filter(i => i >= 0);
+  // Video clips need only their size (the footage moves by itself).
+  for (const [i, a] of assets.entries()) {
+    if (a.mediaVideo && a.mediaFile) a.mediaSize = await probeSize(join(dir, a.mediaFile)).catch(() => undefined);
+  }
+  const todo = plan.scenes.map((s, i) => (assets[i].mediaFile && !assets[i].mediaVideo && s.bullets?.length ? i : -1)).filter(i => i >= 0);
   if (!todo.length) return;
   onProgress(`Finding zoom targets in ${todo.length} screenshot(s)…`);
   for (const i of todo) {

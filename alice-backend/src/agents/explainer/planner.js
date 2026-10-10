@@ -25,17 +25,19 @@ const ANTI_SECOND_GUESS = 'Think briefly, draft once, and output that draft imme
  * The facts block every planning/revision/question prompt shares: brief,
  * fetched website text, attached images, and the user's answers.
  */
-export function contextBlock({ brief, sourceText = '', images = [], answers = '' }) {
+export function contextBlock({ brief, sourceText = '', images = [], answers = '', brand = null }) {
   const parts = [`Brief:\n${brief}`];
   if (sourceText) parts.push(`Source material (fetched from the links in the brief — the authoritative description of the product):\n${sourceText}`);
   if (images.length) {
-    parts.push(`Attached images (reference them by id):\n${images.map(i => `- ${i.id} (${i.kind}): ${i.description || i.name}`).join('\n')}`);
+    const label = (i) => (i.kind === 'video' ? 'video clip' : i.kind);
+    parts.push(`Attached media (reference them by id):\n${images.map(i => `- ${i.id} (${label(i)}): ${i.description || i.name}`).join('\n')}`);
   }
+  if (brand?.accent) parts.push(`Brand (captured from the website): accent colour ${brand.accent}${brand.colors?.length ? `; other site colours ${brand.colors.join(', ')}` : ''}${brand.font ? `; site font ${brand.font}` : ''}`);
   if (answers) parts.push(`The client's answers to your questions:\n${answers}`);
   return parts.join('\n\n');
 }
 
-export function buildPlannerPrompt({ brief, format, presenter, maxPresenterScenes, targetSeconds, sourceText, images = [], answers }) {
+export function buildPlannerPrompt({ brief, format, presenter, maxPresenterScenes, targetSeconds, sourceText, images = [], answers, brand = null }) {
   const shots = images.filter(i => i.kind !== 'logo');
   const hasLogo = images.some(i => i.kind === 'logo');
   const system = `You plan short ${format === 'promo' ? 'product promo' : 'explainer'} videos. Output ONLY a JSON object, no prose, no code fences.
@@ -75,15 +77,15 @@ Rules:
 - Layouts: "title" for the opening card (bullets[0] = optional subtitle), "cta" for the outro (bullets[0] = button text, e.g. "Start free trial"), and for the middle scenes vary between "bullets", "stat" (one striking number), "steps" (how it works), "compare" (before vs after) and "statement" (one bold sentence as the headline; wrap 1-3 key words in *asterisks* to highlight them). Don't use the same middle layout more than twice in a row.
 - style — pick the one that best fits the brand, audience and tone (and follow the client if they ask for a look):
 ${STYLE_IDS.map(id => `  - "${id}": ${STYLES[id].description}`).join('\n')}
-- palette.accent: the brand's main colour if known (from the website/logo), else one that suits the style.
+- palette.accent: the brand's main colour — use the captured brand accent if one is given — else one that suits the style.
 - Stay factual: every number, price, feature, claim and call to action must come from the brief, the source material or the client's answers. Never invent statistics — only use the "stat" layout for a number that appears in them.
 - Spell product, company and feature names exactly as they appear in the brief/source material (same capitalisation) — in speech too. If the client says how a word is pronounced, keep its normal spelling everywhere and add it to "pronunciations" instead.${shots.length ? `
-- Attached screenshots/photos are the real product — use each of them once: set "media" to its id and use layout "showcase" (the image is shown large beside the headline and bullets). Write that scene's speech about what the image shows.` : ''}${hasLogo ? '\n- A logo is attached; it is placed on the title and outro cards automatically.' : ''}
+- Attached screenshots/photos/video clips are the real product, and showing it is the point of the video: every narrated scene about a feature that appears in one of them must show it — set "media" to its id and use layout "showcase" (shown large beside the headline and bullets). Use each id at most once, and use as many of them as fit. A "video clip" is real footage of someone using that screen; it plays on from its start into the footage that follows, so pick the clip where the scene's story begins, and prefer it over a still screenshot of the same screen. Write that scene's speech and bullets about what the media shows (name the specific panels/controls visible, in the order they appear). Use AI background images only for scenes with nothing to show.` : ''}${hasLogo ? '\n- A logo is attached; it is placed on the title and outro cards automatically.' : ''}
 - Headlines may wrap 1-3 key words in *asterisks* to highlight them.
 ${ANTI_SECOND_GUESS}`;
   return [
     { role: 'system', content: system },
-    { role: 'user', content: contextBlock({ brief, sourceText, images, answers }) },
+    { role: 'user', content: contextBlock({ brief, sourceText, images, answers, brand }) },
   ];
 }
 

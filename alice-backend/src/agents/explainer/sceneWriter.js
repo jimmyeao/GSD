@@ -187,8 +187,8 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
   }));
   const file = (s) => join(projectDir, 'compositions', `${s.compId}.html`);
   const fallback = (s) => {
-    const { duration, words, mediaFile, mediaSize, mediaFocus, logoFile } = sceneInfo[s.index];
-    return fallbackSceneHtml(s.compId, s.scene, { style, palette, font, duration, words, mediaFile, mediaSize, mediaFocus, logoFile });
+    const { duration, words, mediaFile, mediaSize, mediaFocus, mediaVideo, logoFile } = sceneInfo[s.index];
+    return fallbackSceneHtml(s.compId, s.scene, { style, palette, font, duration, words, mediaFile, mediaSize, mediaFocus, mediaVideo, logoFile });
   };
   const ask = async (s) => {
     try {

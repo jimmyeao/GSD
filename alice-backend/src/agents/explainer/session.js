@@ -86,7 +86,7 @@ export function storyboardMarkdown(plan, slots, ctx) {
   const mediaName = (id) => ctx.images?.find(i => i.id === id)?.name ?? id;
   const rows = plan.scenes.map((s, i) => {
     const visual = s.type === 'presenter' ? '🎤 presenter on camera'
-      : s.media ? `🖼 your image: ${mediaName(s.media)}`
+      : s.media ? (ctx.images?.find(i => i.id === s.media)?.kind === 'video' ? `🎬 site demo footage: ${mediaName(s.media)}` : `🖼 ${String(mediaName(s.media)).startsWith('site: ') ? 'from the website' : 'your image'}: ${String(mediaName(s.media)).replace(/^site: /, '')}`)
       : s.type === 'narrated' ? `AI background: ${s.image_prompt.slice(0, 70)}`
       : 'title card';
     const onScreen = [s.headline, ...(s.layout === 'steps' && s.steps.length ? s.steps : s.bullets)].filter(Boolean).join(' · ');

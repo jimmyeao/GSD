@@ -26,11 +26,12 @@ import { LLMUnavailableError, complete } from '../llmClient.js';
 import { planExplainer } from './planner.js';
 import { voicePhase, comfyPhase, presenterPhase } from './assets.js';
 import { focusPhase } from './focus.js';
+import { captureSite, harvestCapture } from './capture.js';
 import { remoteWorkerFor, resolveNeeds, workerModels } from '../../comfyWorkers.js';
 import { TALKING_HEAD_NEEDS } from '../talkingHeadClient.js';
 import { layoutTimeline, buildIndexHtml, fallbackSceneHtml, alignScriptWords } from './timeline.js';
 import { writeScenes } from './sceneWriter.js';
-import { researchBrief, describeImages } from './research.js';
+import { researchBrief, describeImages, extractUrls } from './research.js';
 import { resolveStyle } from './styles.js';
 import { assertRuntime, checkProject, renderProject, transcribe, GSAP_JS } from './hyperframesCli.js';
 
@@ -142,7 +143,38 @@ export async function prepareContext(dir, { brief, images = [] }, onProgress = (
     onProgress(`Looking at ${images.length} attached image(s)…`);
     ctx.images = await addImages(dir, images);
   }
+  const url = research.sources.length ? extractUrls(brief)[0] : null;
+  if (url) await addSiteCapture(dir, ctx, url, onProgress);
   return ctx;
+}
+
+const MAX_MEDIA = 12;
+
+/** Product images, logo, brand tokens and demo-video clips from the public site. Best-effort. */
+async function addSiteCapture(dir, ctx, url, onProgress) {
+  try {
+    onProgress(`Capturing ${url} (screens, brand, demo videos)…`);
+    await captureSite(url, join(dir, '.capture'));
+    const site = await harvestCapture(join(dir, '.capture'), dir);
+    const room = Math.max(0, MAX_MEDIA - ctx.images.length);
+    // Uploads come first; the site only adds a logo if none was attached.
+    const hasLogo = ctx.images.some(i => i.kind === 'logo');
+    const added = (await addImages(dir, site.images.slice(0, room), ctx.images)).filter(i => !(hasLogo && i.kind === 'logo'));
+    ctx.images.push(...added);
+    const clips = site.clips.slice(0, Math.max(0, MAX_MEDIA - ctx.images.length));
+    const vision = { endpoint: config.models.vision.endpoint, model: config.models.vision.model, apiKey: config.llmGatewayKey };
+    const described = await describeImages(clips.map((c, k) => ({
+      id: `vid${k + 1}`, name: c.name, dataUrl: `data:image/png;base64,${readFileSync(join(dir, c.poster)).toString('base64')}`,
+    })), vision);
+    clips.forEach((c, k) => ctx.images.push({
+      id: `vid${k + 1}`, name: c.name, kind: 'video', file: c.file, start: c.start, end: c.end, videoDuration: c.videoDuration, poster: c.poster, endFrame: c.endFrame,
+      description: `real footage (${(c.end - c.start).toFixed(1)}s) of ${described[k].description || c.context || 'the product'}`,
+    }));
+    ctx.brand = site.brand;
+    onProgress(`Captured the site: ${added.length} image(s), ${clips.length} demo-video clip(s)${site.brand?.accent ? `, brand colour ${site.brand.accent}` : ''}`);
+  } catch (err) {
+    onProgress(`⚠ site capture skipped (${err.message.slice(0, 120)})`);
+  }
 }
 
 const logoOf = (ctx) => ctx.images?.find(i => i.kind === 'logo')?.file;
@@ -159,7 +191,7 @@ function writeComposition(dir, plan, assets, { musicFile, portraitFile, logoFile
   plan.scenes.forEach((scene, i) => {
     writeFileSync(join(dir, 'compositions', `scene-${i}.html`), fallbackSceneHtml(`scene-${i}`, scene, {
       style, palette: plan.palette, font: plan.font, duration: slots[i].duration, words: assets[i].words ?? [],
-      mediaFile: assets[i].mediaFile, mediaSize: assets[i].mediaSize, mediaFocus: assets[i].mediaFocus,
+      mediaFile: assets[i].mediaFile, mediaSize: assets[i].mediaSize, mediaFocus: assets[i].mediaFocus, mediaVideo: assets[i].mediaVideo,
       logoFile: (scene.type === 'title' || scene.type === 'outro') ? logoFile : undefined,
     }));
   });
@@ -265,7 +297,7 @@ export async function produceVideo(dir, plan, ctx, { voice, seed, creative = fal
     }, { onProgress });
     const logoFile = logoOf(ctx);
     const sceneInfo = slots.map((s, i) => ({
-      duration: s.duration, words: assets[i].words ?? [], mediaFile: assets[i].mediaFile, mediaSize: assets[i].mediaSize, mediaFocus: assets[i].mediaFocus,
+      duration: s.duration, words: assets[i].words ?? [], mediaFile: assets[i].mediaFile, mediaSize: assets[i].mediaSize, mediaFocus: assets[i].mediaFocus, mediaVideo: assets[i].mediaVideo,
       logoFile: (plan.scenes[i].type === 'title' || plan.scenes[i].type === 'outro') ? logoFile : undefined,
     }));
     scenes = await withLLM(() => writeScenes(dir, plan, sceneInfo, { llm: explainerLLM(), check: checkProject, slots, onProgress }), { onProgress });

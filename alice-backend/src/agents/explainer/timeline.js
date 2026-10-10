@@ -136,9 +136,9 @@ export function captionChunks(words, offset, sceneEnd) {
  * checks. Same file contract as LLM output: <template>, root id = compId,
  * one paused timeline at window.__timelines[compId].
  */
-export function fallbackSceneHtml(compId, scene, { style, palette, font, duration, words, mediaFile, mediaSize, mediaFocus, logoFile }) {
+export function fallbackSceneHtml(compId, scene, { style, palette, font, duration, words, mediaFile, mediaSize, mediaFocus, mediaVideo, logoFile }) {
   const canvas = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
-  return buildLayoutHtml(compId, scene, { style, palette, font, duration, words, canvas, mediaFile, mediaSize, mediaFocus, logoFile });
+  return buildLayoutHtml(compId, scene, { style, palette, font, duration, words, canvas, mediaFile, mediaSize, mediaFocus, mediaVideo, logoFile });
 }
 
 // ── Style backgrounds ──────────────────────────────────────────────────

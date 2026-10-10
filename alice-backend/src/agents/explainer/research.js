@@ -44,7 +44,7 @@ export function isPrivateAddress(ip) {
     || (p[0] === 100 && p[1] >= 64 && p[1] <= 127) || p[0] >= 224;
 }
 
-async function assertPublicUrl(raw) {
+export async function assertPublicUrl(raw) {
   let url;
   try { url = new URL(raw); } catch { throw new Error(`not a valid URL: ${raw}`); }
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`only http(s) URLs are allowed: ${raw}`);

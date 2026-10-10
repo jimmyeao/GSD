@@ -99,7 +99,10 @@ export async function voicePhase(dir, plan, { voice, images = [], onProgress = (
   try {
     for (const [i, scene] of plan.scenes.entries()) {
       const a = assets[i];
-      if (scene.media) a.mediaFile = images.find(img => img.id === scene.media)?.file;
+      const media = scene.media ? images.find(img => img.id === scene.media) : null;
+      if (media) a.mediaFile = media.file;
+      // Site demo-video clip: the scene plays that range of real footage.
+      if (media?.kind === 'video') a.mediaVideo = { start: media.start, end: media.end, total: media.videoDuration, poster: media.poster, endFrame: media.endFrame };
       if (!scene.speech) continue;
       // Audio uses the respelled line; captions/on-screen text keep scene.speech.
       a.spoken = applyPronunciations(scene.speech, ttsLex);
@@ -113,6 +116,7 @@ export async function voicePhase(dir, plan, { voice, images = [], onProgress = (
       if (scene.type === 'presenter') a.clipSeconds = clipSecondsFor(a.ttsDur);
       else { a.voiceFile = rel; a.voiceDur = a.ttsDur; }
     }
+    limitVideoClips(assets, images);
     let voiceRefFile = null;
     if (plan.scenes.some(s => s.type === 'presenter')) {
       // The presenter's LTX clips clone THIS sample, so it uses the same engine.
@@ -141,6 +145,23 @@ function demote(plan, assets, i) {
 // A remote worker that hasn't answered for this long is treated as gone
 // (its clips are retried locally) rather than waiting out the 30 min timeout.
 const WORKER_UNREACHABLE_MS = 180_000;
+
+/**
+ * A demo-video clip plays on past its own end (see showcase.js) — but not
+ * into footage another scene shows: stop at the next clip of the same video
+ * used elsewhere, and hold that point's frame. Exported for tests.
+ */
+export function limitVideoClips(assets, images) {
+  const clips = images.filter(m => m.kind === 'video');
+  for (const a of assets) {
+    if (!a.mediaVideo) continue;
+    const { start } = a.mediaVideo;
+    const later = assets.filter(o => o !== a && o.mediaFile === a.mediaFile && o.mediaVideo?.start > start).map(o => o.mediaVideo.start);
+    const limit = later.length ? Math.min(...later) : (a.mediaVideo.total ?? a.mediaVideo.end);
+    const last = clips.filter(c => c.file === a.mediaFile && c.end <= limit + 0.01).sort((x, y) => y.end - x.end)[0];
+    a.mediaVideo = { ...a.mediaVideo, limit, ...(last?.endFrame ? { endFrame: last.endFrame } : {}) };
+  }
+}
 
 /** Generate (or reuse) one ComfyUI output at `rel`. */
 async function cached(dir, rel, make) {
