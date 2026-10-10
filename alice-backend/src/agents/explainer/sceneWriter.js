@@ -102,7 +102,7 @@ export function extractHtml(reply) {
  * Cheap pre-check rules that lint/check don't (reliably) enforce.
  * Returns a list of human-readable problems ([] = pass).
  */
-export function staticCheck(html, compId, font, scene = null, { logoFile } = {}) {
+export function staticCheck(html, compId, font, scene = null, { logoFile, allowImgSrc = [] } = {}) {
   const problems = [];
   if (!html) return ['no HTML file found in the reply'];
   if (scene) {
@@ -119,7 +119,10 @@ export function staticCheck(html, compId, font, scene = null, { logoFile } = {})
   // The brand logo is the one image allowed (title/outro), and then required.
   const logoTag = logoFile ? new RegExp(`<img\\b[^>]*\\bsrc=["']${logoFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["'][^>]*>`, 'gi') : null;
   if (logoTag && !logoTag.test(html)) problems.push(`include the logo exactly as <img id="${compId}-logo" src="${logoFile}" alt=""> (sized with CSS, never stretched)`);
-  if (/<(img|video|audio|iframe|canvas)\b/i.test(logoTag ? html.replace(logoTag, '') : html)) problems.push(logoFile ? `no <img>/<video>/<audio>/<iframe>/<canvas> elements other than the logo` : 'no <img>/<video>/<audio>/<iframe>/<canvas> elements');
+  // allowImgSrc: images the file already had (a direct edit of a screenshot scene keeps its screenshot).
+  const allowed = new Set([...allowImgSrc, ...(logoFile ? [logoFile] : [])]);
+  const stripped = html.replace(/<img\b[^>]*\bsrc=["']([^"']+)["'][^>]*>/gi, (tag, src) => (allowed.has(src) ? '' : tag));
+  if (/<(img|video|audio|iframe|canvas)\b/i.test(stripped)) problems.push(allowed.size ? `no <img>/<video>/<audio>/<iframe>/<canvas> elements other than ${[...allowed].map(a => `<img src="${a}">`).join(', ')}` : 'no <img>/<video>/<audio>/<iframe>/<canvas> elements');
   if (/url\(|https?:\/\//i.test(html)) problems.push('no url() or http(s) links');
   if (/Math\.random|Date\.now|new Date|setTimeout|setInterval|requestAnimationFrame|repeat:\s*-1/.test(html)) problems.push('no Math.random/Date/timers/infinite repeats');
   if (/<br\b/i.test(html)) problems.push('no <br>');

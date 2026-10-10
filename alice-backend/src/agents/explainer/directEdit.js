@@ -16,7 +16,9 @@ import { complete } from '../llmClient.js';
 import { staticCheck, belongsTo, extractHtml } from './sceneWriter.js';
 import { checkProject } from './hyperframesCli.js';
 
-const FILE_LINE = /^\s*File:\s*([\w./-]+?\.html)(?::\d+)?\s*$/m;
+// "File: compositions/scene-2.html:14" (older Studio) or, in the
+// "HyperFrames element edit request v1" schema, "Composition: compositions/scene-2.html".
+const FILE_LINE = /^\s*(?:File|Composition):\s*([\w./-]+?\.html)(?::\d+)?\s*$/m;
 const ALLOWED = /^(index\.html|compositions\/[\w-]+\.html)$/;
 const ANTI_SECOND_GUESS = 'Think briefly, write the file once, and output it immediately — do not reconsider, revise, or second-guess it once written.';
 
@@ -69,7 +71,7 @@ export async function applyDirectEdit(dir, plan, slots, message, { llm, complete
     const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 16_000, temperature: 0.3, signal: AbortSignal.timeout(420_000) });
     const html = extractHtml(reply);
     problems = !html ? ['no complete HTML file in the reply']
-      : compId ? staticCheck(html, compId, plan.font)
+      : compId ? staticCheck(html, compId, plan.font, null, { allowImgSrc: [...original.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi)].map(m => m[1]) })
       : (!html.includes('data-composition-id="main"') || !/window\.__timelines\[["']main["']\]/.test(html) ? ['the root composition (data-composition-id="main") and its timeline registration must be kept'] : []);
     if (!problems.length) {
       writeFileSync(path, html);

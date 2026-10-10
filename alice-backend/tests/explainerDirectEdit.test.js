@@ -21,6 +21,7 @@ describe('parseStudioPrompt', () => {
   it('finds the File: line from a Studio "Copy prompt"', () => {
     assert.deepEqual(parseStudioPrompt(studioPrompt), { file: 'compositions/scene-1.html' });
     assert.deepEqual(parseStudioPrompt('File: index.html:3'), { file: 'index.html' });
+    assert.deepEqual(parseStudioPrompt('## HyperFrames element edit request v1\nSchema version: 1\n\nzoom in\n\nComposition: compositions/scene-2.html\nSource file: /abs/x/compositions/scene-2.html\nDOM id: scene-2-img'), { file: 'compositions/scene-2.html' });
   });
   it('ignores ordinary messages and refuses paths outside the composition files', () => {
     assert.equal(parseStudioPrompt('make scene 2 shorter'), null);
