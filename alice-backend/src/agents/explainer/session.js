@@ -30,6 +30,8 @@ import { reviewEffects, currentEffects } from './effectsReview.js';
 
 const APPROVE = /^\s*(approve[d]?|go( ahead)?|render( it)?|looks good|lgtm|yes[,.!]?\s*(render|go|do it|approve)?|ship it|perfect|do it|make it|ok(ay)?[,.!]?\s*(go|render)?)\s*[.!]*\s*$/i;
 const RENDER_EDITS = /\b(render|use|keep) (my |the )?(studio |manual )?edits\b|\brender (the )?studio( version)?\b|\brender (it )?as[- ]is\b/i;
+// Messages about the whole video still go to a storyboard revision, even right after a direct edit.
+const REVISION_WORDS = /\b(storyboard|style|re-?plan|voice(over)?|music|presenter|script|all scenes|every scene|whole video|start over|new scene|add a scene|remove (the )?scene)\b/i;
 const OPEN_STUDIO = /^\s*(please\s+)?(open|edit|launch|show|give me)(\s+(it|this|the video))?\s+(in\s+)?(the\s+)?(an?\s+)?(new\s+)?(hyperframes\s+)?(studio|editor|edit link|studio link|editor link)(\s+link)?(\s+again)?\s*(please)?\s*[.!?]*\s*$|^\s*(studio|editor)\s*[.!?]*\s*$/i;
 const OVERRIDE_EDITS = /\banyway\b|\bdiscard (my )?edits\b/i;
 const SKIP_QUESTIONS = /^\s*(use (your )?defaults?|go with (your )?defaults?|skip|no questions|just do it)\b/i;
@@ -184,6 +186,14 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
       return;
     }
 
+    // ── Plain-text follow-up to the edit just made ("now move it outside the
+    // image"): another direct edit of that scene, not a storyboard revision.
+    const last = state.lastEdit;
+    if (state.stage === 'done' && last && !parseStudioPrompt(message) && Date.now() - last.at < 2 * 3600_000
+      && !REVISION_WORDS.test(message) && !OVERRIDE_EDITS.test(message)) {
+      message = `${message}\n\n(This is a follow-up to the previous edit of this scene, which was: "${last.instruction.slice(0, 400)}". Adjust the result of that edit as asked.)\n\nFile: ${last.file}`;
+    }
+
     // ── Studio "Copy prompt" pasted here: Alice edits the file directly ──
     if (parseStudioPrompt(message)) {
       if (state.stage !== 'done') {
@@ -220,6 +230,7 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
       const file = await renderProject(dir, join(dir, 'out.mp4'));
       state.handEdited = true;
       state.composedAt = compositionMtime(dir);
+      state.lastEdit = { file: res.file, instruction: instruction.split('\n\n(This is a follow-up')[0], at: Date.now() };
       save(dir, state);
       const url = await ui.saveVideo(file, state.plan.title);
       ui.say(`Done — edited **${res.file}**${res.attempts > 1 ? ' (second attempt)' : ''}. If Studio is open it has already reloaded the change.\n\n[Download video](${url})\n\n<video controls width="640" src="${url}"></video>`);

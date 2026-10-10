@@ -191,7 +191,10 @@ export class Chat {
 
     const content = document.createElement('div');
     content.className = 'bubble-content';
-    if (text) content.innerHTML = this._renderContent(text, true);
+    // The user's own text is never parsed as markdown/HTML: pasted HyperFrames
+    // Studio prompts include raw element HTML (an absolutely-positioned,
+    // unclosed <div>), which rendered as a giant box over the page.
+    if (text) content.innerHTML = role === 'user' ? this._escapeHtml(text).replace(/\n/g, '<br>') : this._renderContent(text, true);
     wrap.appendChild(content);
 
     return wrap;
