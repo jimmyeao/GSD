@@ -20,6 +20,7 @@ import { join } from 'node:path';
 import { complete } from '../llmClient.js';
 import { ALLOWED_FONTS } from './planner.js';
 import { SAFE_AREAS, fallbackSceneHtml } from './timeline.js';
+import { loadCatalog, itemSource } from './catalog.js';
 import { resolveStyle } from './styles.js';
 
 const MAX_FIX_ROUNDS = 2;
@@ -65,7 +66,39 @@ Hard rules (violations are rejected):
 - Text must be large and readable: headlines 64-120px, body 36-52px.
 ${ANTI_SECOND_GUESS}`;
 
-export function buildScenePrompt(compId, scene, { palette, font, duration, words, logoFile }) {
+/**
+ * The scene's reviewed catalogue effects as prompt text: a description for
+ * each, plus the real registry source of non-native items to adapt.
+ * @param {{name, description, source?}[]} notes
+ */
+export function effectsBlock(notes) {
+  if (!notes?.length) return '';
+  const lines = notes.map(n => `- ${n.name}: ${n.description}`).join('\n');
+  const refs = notes.filter(n => n.source).map(n => `--- reference: ${n.name} (HyperFrames catalogue source) ---\n${n.source}`).join('\n\n');
+  return `
+Effects chosen for this scene from the HyperFrames catalogue — build them into your scene:
+${lines}${refs ? `
+Below is the real source of the catalogue effect(s). Adapt the motion technique (structure, timing, easing, layering) to THIS scene's content, ids, palette and font. Do not copy its demo text, its colours or fonts, its external scripts/URLs, or any <img>/<canvas>; it is a reference, not a file to paste.
+${refs}` : ''}`;
+}
+
+/** Look up descriptions (and sources for non-native items) for a scene's effects. */
+export async function effectNotes(effects, { catalog, source = itemSource } = {}) {
+  const names = (effects?.items ?? []).filter(Boolean);
+  if (!names.length) return [];
+  const items = catalog ?? await loadCatalog();
+  const { NATIVE } = await import('./catalog.js');
+  const out = [];
+  for (const name of names) {
+    const item = items.find(x => x.name === name);
+    if (!item) continue;
+    const src = NATIVE[name] ? '' : await source(name).catch(() => '');
+    out.push({ name, description: String(item.description ?? '').slice(0, 220), ...(src ? { source: src } : {}) });
+  }
+  return out;
+}
+
+export function buildScenePrompt(compId, scene, { palette, font, duration, words, logoFile, effects }) {
   const area = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
   const cues = (words ?? []).slice(0, 60).map(w => `${w.start.toFixed(2)}s "${w.text}"`).join(', ');
   const context = {
@@ -84,7 +117,7 @@ Headline: ${scene.headline || '(none)'}
 Bullets: ${scene.bullets.length ? scene.bullets.map(b => `"${b}"`).join(', ') : '(none)'}
 Motion idea: ${scene.visual_idea || 'clean, confident entrances'}
 ${cues ? `Spoken word timings (scene-local) — reveal each bullet near the word it relates to: ${cues}` : ''}${logoFile ? `
-Brand logo: include it as <img id="${compId}-logo" src="${logoFile}" alt=""> — the only image allowed. Give it a CSS height of 90-140px with width auto (never stretch it), place it prominently above or beside the headline, and animate it in.` : ''}`;
+Brand logo: include it as <img id="${compId}-logo" src="${logoFile}" alt=""> — the only image allowed. Give it a CSS height of 90-140px with width auto (never stretch it), place it prominently above or beside the headline, and animate it in.` : ''}${effectsBlock(effects)}`;
   const system = RULES.replaceAll('COMP_ID', compId).replaceAll('CANVAS_W', String(area.width)).replaceAll('CANVAS_H', String(area.height));
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
@@ -180,9 +213,11 @@ function fixMessage(problems) {
 export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slots, onProgress = () => {}, completeFn = complete }) {
   const { palette, font } = plan;
   const style = resolveStyle(plan);
+  // Reviewed catalogue effects for the scenes Qwen writes (descriptions + real sources).
+  const notes = await Promise.all(plan.scenes.map((scene, i) => (sceneInfo[i].mediaFile ? [] : effectNotes(scene.effects).catch(() => []))));
   const states = plan.scenes.map((scene, i) => ({
     index: i, compId: `scene-${i}`, scene, rounds: 0, done: false, source: 'fallback',
-    messages: buildScenePrompt(`scene-${i}`, scene, { palette, font, duration: sceneInfo[i].duration, words: sceneInfo[i].words, logoFile: sceneInfo[i].logoFile }),
+    messages: buildScenePrompt(`scene-${i}`, scene, { palette, font, duration: sceneInfo[i].duration, words: sceneInfo[i].words, logoFile: sceneInfo[i].logoFile, effects: notes[i] }),
     html: '',
   }));
   const file = (s) => join(projectDir, 'compositions', `${s.compId}.html`);

@@ -128,8 +128,11 @@ function roleOf(tags) {
 /** Compact menu text for the reviewer prompt, grouped by role. */
 export function menuText(menu) {
   const roles = ['transition', 'text', 'callout', 'demo', 'data', 'cta', 'logo', 'overlay'];
+  // One name per native effect (aliases like light-leak / organic-light-leak-overlay render the same).
+  const seen = new Set();
+  const shown = menu.filter(m => !m.native || (!seen.has(m.native) && seen.add(m.native)));
   return roles.map(role => {
-    const items = menu.filter(m => m.role === role);
+    const items = shown.filter(m => m.role === role);
     if (!items.length) return '';
     return `## ${role}\n${items.map(m => `- ${m.name}${m.native ? ' [native]' : ''}: ${m.description}`).join('\n')}`;
   }).filter(Boolean).join('\n\n');

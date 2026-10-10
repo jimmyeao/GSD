@@ -24,6 +24,7 @@ import { assertRuntime, renderProject } from './hyperframesCli.js';
 import { parseStudioPrompt, applyDirectEdit } from './directEdit.js';
 import { layoutTimeline } from './timeline.js';
 import { STYLES, STYLE_IDS } from './styles.js';
+import { reviewEffects, currentEffects } from './effectsReview.js';
 
 const APPROVE = /^\s*(approve[d]?|go( ahead)?|render( it)?|looks good|lgtm|yes[,.!]?\s*(render|go|do it|approve)?|ship it|perfect|do it|make it|ok(ay)?[,.!]?\s*(go|render)?)\s*[.!]*\s*$/i;
 const RENDER_EDITS = /\b(render|use|keep) (my |the )?(studio |manual )?edits\b|\brender (the )?studio( version)?\b|\brender (it )?as[- ]is\b/i;
@@ -90,7 +91,8 @@ export function storyboardMarkdown(plan, slots, ctx) {
       : s.type === 'narrated' ? `AI background: ${s.image_prompt.slice(0, 70)}`
       : 'title card';
     const onScreen = [s.headline, ...(s.layout === 'steps' && s.steps.length ? s.steps : s.bullets)].filter(Boolean).join(' · ');
-    return `| ${i + 1} | ${slots[i].start.toFixed(1)}s | ${cell(s.layout || s.type)} | ${cell(onScreen)} | ${cell(visual)} | ${cell(s.speech)} |`;
+    const fx = [s.effects?.transition && `→ ${s.effects.transition}`, ...(s.effects?.items ?? [])].filter(Boolean).join(', ');
+    return `| ${i + 1} | ${slots[i].start.toFixed(1)}s | ${cell(s.layout || s.type)} | ${cell(onScreen)} | ${cell(visual)} | ${cell(fx)} | ${cell(s.speech)} |`;
   });
   const lines = [
     `### Storyboard — ${plan.title}`,
@@ -99,9 +101,10 @@ export function storyboardMarkdown(plan, slots, ctx) {
     plan.presenter ? `**Presenter:** ${plan.presenter.description} (${plan.presenter.gender ?? 'female'} voice)` : '**Presenter:** none (voiceover only)',
     ...(plan.removedClaims?.length ? [`⚠ Removed claims not found in the brief or website: ${plan.removedClaims.map(c => `"${c}"`).join(', ')} — tell me if any of them are real and I'll put them back.`] : []),
     `**Music:** ${plan.music.prompt}`,
+    ...(plan.scenes.some(s => s.effects) ? [`**Effects** (picked from the HyperFrames catalogue${plan.effects?.overlay ? `; whole video: ${plan.effects.overlay}` : ''}) — say e.g. "use a light leak into scene 4" to change them.`] : []),
     '',
-    '| # | At | Layout | On screen | Visual | Voiceover |',
-    '|---|---|---|---|---|---|',
+    '| # | At | Layout | On screen | Visual | Effects | Voiceover |',
+    '|---|---|---|---|---|---|---|',
     ...rows,
   ];
   return lines.join('\n');
@@ -224,6 +227,8 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
       state.answers = message && !SKIP_QUESTIONS.test(message) ? message : 'No answers — use your suggested defaults.';
       progress('Writing the storyboard…');
       state.plan = await withLLM(() => planExplainer(llm, planCtx()), { onProgress: progress });
+      progress('Reviewing the HyperFrames catalogue for effects…');
+      state.plan = await withLLM(() => reviewEffects(llm, state.plan, { creative: !!state.opts.creative }), { onProgress: progress });
       return await showStoryboard(dir, state, ui, progress);
     }
 
@@ -253,7 +258,10 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
 
     state.handEdited = false; // a revision rebuilds the composition from the plan
     progress('Revising the storyboard…');
+    const previous = currentEffects(state.plan);
     state.plan = await withLLM(() => revisePlan(llm, state.plan, message, planCtx()), { onProgress: progress });
+    // Re-review effects: keeps earlier picks unless the feedback (e.g. "use a light leak into scene 4") changes them.
+    state.plan = await withLLM(() => reviewEffects(llm, state.plan, { creative: !!state.opts.creative, feedback: message, previous }), { onProgress: progress });
     return await showStoryboard(dir, state, ui, progress);
   } finally {
     locks.delete(id);

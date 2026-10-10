@@ -22,7 +22,7 @@ describe('storyboardMarkdown', () => {
     };
     const md = storyboardMarkdown(plan, [{ start: 0, duration: 3.5 }, { start: 3.5, duration: 4 }], { images: [{ id: 'img2', name: 'dashboard.png' }] });
     assert.match(md, /Storyboard — TheiaCast/);
-    assert.match(md, /\| 2 \| 3\.5s \| showcase \| Dashboard \\\| live · A \| 🖼 your image: dashboard\.png \| Control every screen\. \|/);
+    assert.match(md, /\| 2 \| 3\.5s \| showcase \| Dashboard \\\| live · A \| 🖼 your image: dashboard\.png \| — \| Control every screen\. \|/);
     assert.match(md, /~8s · 2 scenes/);
   });
 });
