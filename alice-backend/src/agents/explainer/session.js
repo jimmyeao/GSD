@@ -28,7 +28,7 @@ import { reviewEffects, currentEffects } from './effectsReview.js';
 
 const APPROVE = /^\s*(approve[d]?|go( ahead)?|render( it)?|looks good|lgtm|yes[,.!]?\s*(render|go|do it|approve)?|ship it|perfect|do it|make it|ok(ay)?[,.!]?\s*(go|render)?)\s*[.!]*\s*$/i;
 const RENDER_EDITS = /\b(render|use|keep) (my |the )?(studio |manual )?edits\b|\brender (the )?studio( version)?\b|\brender (it )?as[- ]is\b/i;
-const OPEN_STUDIO = /^\s*(please\s+)?(open|edit|launch|show)(\s+(it|this|the video))?\s+(in\s+)?(the\s+)?(hyperframes\s+)?studio\s*[.!?]*\s*$|^\s*studio\s*[.!?]*\s*$/i;
+const OPEN_STUDIO = /^\s*(please\s+)?(open|edit|launch|show|give me)(\s+(it|this|the video))?\s+(in\s+)?(the\s+)?(an?\s+)?(new\s+)?(hyperframes\s+)?(studio|editor|edit link|studio link|editor link)(\s+link)?(\s+again)?\s*(please)?\s*[.!?]*\s*$|^\s*(studio|editor)\s*[.!?]*\s*$/i;
 const OVERRIDE_EDITS = /\banyway\b|\bdiscard (my )?edits\b/i;
 const SKIP_QUESTIONS = /^\s*(use (your )?defaults?|go with (your )?defaults?|skip|no questions|just do it)\b/i;
 const locks = new Set();

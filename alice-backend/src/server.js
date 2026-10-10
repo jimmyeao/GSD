@@ -216,6 +216,13 @@ io.on('connection', (socket) => {
     let agentId = requestedAgent;
 
     // ── Routing ────────────────────────────────────────────────────
+    // An explainer conversation stays with the explainer: follow-ups like
+    // "open editor" or "make it shorter" are session commands, and routing
+    // them afresh sent them to AssistantAgent (which re-posted stale links).
+    if ((!agentId || agentId === 'RouterAgent') && conversationId) {
+      const conv = stmts.getConversation.get(conversationId, socket.user.id);
+      if (conv?.agent_id === 'ExplainerAgent' || existsSync(join(EXPLAINERS_DIR, `conv-${Number(conversationId)}`))) agentId = 'ExplainerAgent';
+    }
     if (!agentId || agentId === 'RouterAgent') {
       agentId = await routeWithLLM(
         content,
