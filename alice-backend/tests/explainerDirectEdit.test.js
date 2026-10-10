@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseStudioPrompt, applyDirectEdit } from '../src/agents/explainer/directEdit.js';
+import { parseStudioPrompt, applyDirectEdit, studioInstruction } from '../src/agents/explainer/directEdit.js';
 
 const studioPrompt = `Make the headline bigger and gold
 Element: Headline (#scene-1-h)
@@ -19,9 +19,15 @@ const scene = (text, extra = '') => `<!doctype html><html><head></head><body><te
 
 describe('parseStudioPrompt', () => {
   it('finds the File: line from a Studio "Copy prompt"', () => {
-    assert.deepEqual(parseStudioPrompt(studioPrompt), { file: 'compositions/scene-1.html' });
+    assert.equal(parseStudioPrompt(studioPrompt).file, 'compositions/scene-1.html');
     assert.deepEqual(parseStudioPrompt('File: index.html:3'), { file: 'index.html' });
-    assert.deepEqual(parseStudioPrompt('## HyperFrames element edit request v1\nSchema version: 1\n\nzoom in\n\nComposition: compositions/scene-2.html\nSource file: /abs/x/compositions/scene-2.html\nDOM id: scene-2-img'), { file: 'compositions/scene-2.html' });
+    assert.deepEqual(parseStudioPrompt('## HyperFrames element edit request v1\nSchema version: 1\n\nzoom in\n\nComposition: compositions/scene-2.html\nSource file: /abs/x/compositions/scene-2.html\nDOM id: scene-2-img'), { file: 'compositions/scene-2.html', dom: 'scene-2-img', scene: 2 });
+  });
+  it('retargets a scene background in index.html to that scene\'s file', () => {
+    const msg = '## HyperFrames element edit request v1\nSchema version: 1\n\nzoom in on fleet status, then storage\n\nComposition: index.html\nPlayback time: 00:25\nDOM id: bg-3\nSelector: #bg-3';
+    assert.deepEqual(parseStudioPrompt(msg), { file: 'compositions/scene-3.html', dom: 'bg-3', scene: 3, retargeted: true });
+    assert.equal(studioInstruction(msg), 'zoom in on fleet status, then storage');
+    assert.equal(parseStudioPrompt('Composition: index.html\nDOM id: cap-4').file, 'index.html'); // captions really are in index.html
   });
   it('ignores ordinary messages and refuses paths outside the composition files', () => {
     assert.equal(parseStudioPrompt('make scene 2 shorter'), null);

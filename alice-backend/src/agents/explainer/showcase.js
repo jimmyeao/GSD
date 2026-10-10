@@ -113,11 +113,13 @@ export function showcase(id, s, ctx) {
   const H = size?.width ? shotW * size.height / size.width : null;
   // A captured full web page is far taller than the window: show a 16:10 viewport and scroll.
   const Hv = H && H > shotW * 0.75 ? Math.round(shotW * 0.625) : H;
-  const keys = video ? [] : cameraKeys({ focus: ctx.mediaFocus, size, times, width: shotW, viewportH: Hv, duration: ctx.duration });
+  // Targets: an explicit focus list (a "zoom to X, then Y" edit) timed to where the narration says them, else the bullets.
+  const ftimes = s.focus?.length ? revealTimes(s.focus, ctx.words, { firstAt: 1.1, gap: 1.6, latest: ctx.duration - 1.5 }) : times;
+  const keys = video && !s.focus?.length ? [] : cameraKeys({ focus: ctx.mediaFocus, size, times: ftimes, width: shotW, viewportH: Hv, duration: ctx.duration });
   const act = interaction(id, keys, { W: shotW, Hv: Hv ?? shotW * 0.5625, duration: ctx.duration, accent: st.palette.accent, callout: ctx.fx?.callout });
 
   let camera;
-  if (keys.length) camera = focusTweens(`#${id}-stage`, { focus: ctx.mediaFocus, size, times, width: shotW, viewportH: Hv, duration: ctx.duration });
+  if (keys.length) camera = focusTweens(`#${id}-stage`, { focus: ctx.mediaFocus, size, times: ftimes, width: shotW, viewportH: Hv, duration: ctx.duration });
   else if (Hv && H > Hv + 1) camera = `  tl.fromTo("#${id}-stage", { y: 0 }, { y: ${r2(Hv - H)}, duration: ${r2(Math.max(1, ctx.duration - 1.4))}, ease: "power1.inOut" }, 0.8);`;
   else camera = `  tl.fromTo("#${id}-stage", { scale: 1.0 }, { scale: ${video ? 1.08 : 1.06}, duration: ${r2(Math.max(1, ctx.duration - 0.2))}, ease: "none" }, 0.2);`;
 

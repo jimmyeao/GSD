@@ -22,12 +22,34 @@ const FILE_LINE = /^\s*(?:File|Composition):\s*([\w./-]+?\.html)(?::\d+)?\s*$/m;
 const ALLOWED = /^(index\.html|compositions\/[\w-]+\.html)$/;
 const ANTI_SECOND_GUESS = 'Think briefly, write the file once, and output it immediately — do not reconsider, revise, or second-guess it once written.';
 
-/** Is this message a Studio "Copy prompt" (or an explicit File: edit request)? */
+const DOM_LINE = /^\s*DOM id:\s*([\w-]+)/m;
+// Root-timeline elements that belong to one scene (index.html): clicking a
+// scene in Studio usually selects its full-frame background, not its graphics.
+const SCENE_HOST = /^(?:bg|bgw|bgx|kb|g|presenter|pph-img|leak|flash)-(\d+)(?:-|$)/;
+
+/**
+ * Is this message a Studio "Copy prompt" (or an explicit File: edit request)?
+ * Edits aimed at a scene's background/graphics host in index.html are
+ * retargeted to that scene's own file (index.html is the whole 24 KB
+ * timeline; asking the LLM to rewrite it ran out of output budget).
+ * @returns {{file, dom?, scene?, retargeted?}|null}
+ */
 export function parseStudioPrompt(message) {
   const m = FILE_LINE.exec(message ?? '');
   if (!m) return null;
   const file = m[1].replace(/^\.?\//, '');
-  return ALLOWED.test(file) ? { file } : null;
+  if (!ALLOWED.test(file)) return null;
+  const dom = DOM_LINE.exec(message)?.[1];
+  const host = file === 'index.html' && dom ? SCENE_HOST.exec(dom) : null;
+  if (host) return { file: `compositions/scene-${host[1]}.html`, dom, scene: Number(host[1]), retargeted: true };
+  const scene = /compositions\/scene-(\d+)\.html$/.exec(file)?.[1];
+  return { file, ...(dom ? { dom } : {}), ...(scene ? { scene: Number(scene) } : {}) };
+}
+
+/** The client's own words from a Studio edit request (without the element dump). */
+export function studioInstruction(message) {
+  return String(message ?? '').split(/\n\s*(?:Composition|File):/)[0]
+    .replace(/^\s*#*\s*HyperFrames element edit request v\d+\s*/i, '').replace(/^\s*Schema version:\s*\d+\s*/im, '').trim();
 }
 
 function safePath(dir, file) {
@@ -36,7 +58,7 @@ function safePath(dir, file) {
   return p;
 }
 
-function buildEditPrompt(file, html, message, font) {
+function buildEditPrompt(file, html, message, font, retargeted = false) {
   const isScene = file.startsWith('compositions/');
   const w = /data-width="(\d+)"/.exec(html)?.[1], h = /data-height="(\d+)"/.exec(html)?.[1];
   const system = `You edit ONE file of a HyperFrames video project (HTML + GSAP, rendered frame-by-frame to video). Apply exactly the change the client asks for to the element they selected, and change nothing else. Output ONLY the complete edited file, no prose, no code fences.
@@ -49,7 +71,8 @@ Rules:
 - Every #id used in CSS/JS must exist on an element.
 ${w && h ? `- This composition's canvas is ${w}x${h}px. ALL text must stay fully inside it and must not cover other text: if the request can't fit literally (e.g. "much bigger"), make the closest change that fits — the largest size that still wraps cleanly within ${w}px and leaves room for the other elements.
 ` : ''}${ANTI_SECOND_GUESS}`;
-  const user = `The client's request (copied from HyperFrames Studio, with the selected element's details):\n${message}\n\nCurrent ${file}:\n${html}`;
+  const note = retargeted ? `\n\n(The client clicked this scene's full-frame background in Studio; the request is about this scene, so apply it to this scene's graphics file below. Ignore the selected-element details.)` : '';
+  const user = `The client's request (copied from HyperFrames Studio, with the selected element's details):\n${message}${note}\n\nCurrent ${file}:\n${html}`;
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 
@@ -64,11 +87,12 @@ export async function applyDirectEdit(dir, plan, slots, message, { llm, complete
   const original = readFileSync(path, 'utf8');
   const compId = /compositions\/(scene-\d+)\.html$/.exec(target.file)?.[1];
   const sceneIndex = compId ? Number(compId.split('-')[1]) : -1;
-  const messages = buildEditPrompt(target.file, original, message, plan.font);
+  const messages = buildEditPrompt(target.file, original, message, plan.font, target.retargeted);
 
   let problems = [];
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 16_000, temperature: 0.3, signal: AbortSignal.timeout(420_000) });
+    // Retry without reasoning: a long thinking pass can eat the whole output budget before the file.
+    const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 16_000, temperature: 0.3, noThink: attempt > 1, signal: AbortSignal.timeout(420_000) });
     const html = extractHtml(reply);
     problems = !html ? ['no complete HTML file in the reply']
       : compId ? staticCheck(html, compId, plan.font, null, { allowImgSrc: [...original.matchAll(/<img\b[^>]*\bsrc=["']([^"']+)["']/gi)].map(m => m[1]) })

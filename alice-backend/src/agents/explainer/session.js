@@ -21,7 +21,9 @@ import { join } from 'node:path';
 import { askQuestions, planExplainer, revisePlan } from './planner.js';
 import { projectDir, prepareContext, addImages, makeAnimatic, produceVideo, withLLM, explainerLLM, EXPLAINERS_DIR } from './pipeline.js';
 import { assertRuntime, renderProject } from './hyperframesCli.js';
-import { parseStudioPrompt, applyDirectEdit } from './directEdit.js';
+import { parseStudioPrompt, applyDirectEdit, studioInstruction } from './directEdit.js';
+import { FOCUS_REQUEST, applyFocusEdit } from './focusEdit.js';
+import { checkProject } from './hyperframesCli.js';
 import { layoutTimeline } from './timeline.js';
 import { STYLES, STYLE_IDS } from './styles.js';
 import { reviewEffects, currentEffects } from './effectsReview.js';
@@ -190,7 +192,25 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
       }
       const { assets } = JSON.parse(readFileSync(join(dir, 'assets.json'), 'utf8'));
       const slots = layoutTimeline(state.plan.scenes, assets);
-      progress(`Editing ${parseStudioPrompt(message).file}…`);
+      const target = parseStudioPrompt(message);
+      const instruction = studioInstruction(message);
+      // "Zoom in / highlight X, then Y" on a screenshot or footage scene: the vision-guided camera does it.
+      if (target.scene != null && assets[target.scene]?.mediaFile && FOCUS_REQUEST.test(instruction)) {
+        progress(`Finding what to highlight in scene ${target.scene + 1}…`);
+        const fx = await withLLM(() => applyFocusEdit(dir, state.plan, target.scene, instruction, { llm, check: checkProject }), { onProgress: progress });
+        if (fx.ok) {
+          progress(`Zooming to ${fx.found.map(t => `"${t}"`).join(' → ')} — rendering…`);
+          const file = await renderProject(dir, join(dir, 'out.mp4'));
+          state.composedAt = compositionMtime(dir);
+          save(dir, state);
+          const url = await ui.saveVideo(file, state.plan.title);
+          const missed = fx.targets.filter(t => !fx.found.includes(t));
+          ui.say(`Done — scene ${target.scene + 1} now zooms to ${fx.found.map(t => `**${t}**`).join(', then ')}, each highlighted as the narration reaches it, then pulls back out.${missed.length ? ` I couldn't find ${missed.map(t => `"${t}"`).join(', ')} on that screen.` : ''}\n\n[Download video](${url})\n\n<video controls width="640" src="${url}"></video>`);
+          return;
+        }
+        progress(`⚠ ${fx.message} — trying a direct edit instead…`);
+      }
+      progress(`Editing ${target.file}${target.retargeted ? ` (scene ${target.scene + 1})` : ''}…`);
       const res = await withLLM(() => applyDirectEdit(dir, state.plan, slots, message, { llm }), { onProgress: progress });
       if (!res.ok) {
         ui.say(`I couldn't make that edit cleanly — the result kept failing checks, so I left **${res.file}** unchanged:\n\n${res.problems.slice(0, 4).map(p => `- ${p}`).join('\n')}\n\nTry rewording the request, or make this one by hand in Studio.`);
@@ -259,7 +279,10 @@ export async function handleExplainerTurn({ convId, message, images = [], opts }
     state.handEdited = false; // a revision rebuilds the composition from the plan
     progress('Revising the storyboard…');
     const previous = currentEffects(state.plan);
+    const focusByMedia = new Map(state.plan.scenes.filter(s => s.media && s.focus?.length).map(s => [s.media, s.focus]));
     state.plan = await withLLM(() => revisePlan(llm, state.plan, message, planCtx()), { onProgress: progress });
+    // Keep "zoom to X, then Y" targets on scenes that still show the same media.
+    for (const s of state.plan.scenes) if (s.media && focusByMedia.has(s.media)) s.focus = focusByMedia.get(s.media);
     // Re-review effects: keeps earlier picks unless the feedback (e.g. "use a light leak into scene 4") changes them.
     state.plan = await withLLM(() => reviewEffects(llm, state.plan, { creative: !!state.opts.creative, feedback: message, previous }), { onProgress: progress });
     return await showStoryboard(dir, state, ui, progress);

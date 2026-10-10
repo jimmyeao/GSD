@@ -16,7 +16,38 @@ import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { config } from '../../config.js';
+import { execFile } from 'node:child_process';
 import { probeSize } from './hyperframesCli.js';
+
+const FFMPEG = process.env.FFMPEG_BIN ?? join(process.env.HOME ?? '', '.local/bin/ffmpeg');
+
+/** One frame of a video as a PNG in the project (for locating targets on footage). */
+function grabFrame(dir, video, at, rel) {
+  return new Promise((resolve) => {
+    execFile(FFMPEG, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', String(at), '-i', join(dir, video), '-frames:v', '1', join(dir, rel)], { timeout: 60_000 },
+      () => resolve(existsSync(join(dir, rel)) ? rel : null));
+  });
+}
+
+/**
+ * Zoom targets for one scene's media → sets asset.mediaSize / mediaFocus.
+ * Targets: the scene's explicit `focus` list (from a "zoom to X, then Y"
+ * edit) or else its bullets. Footage only gets targets when asked for
+ * explicitly (it moves by itself); they're found on its opening frame.
+ */
+export async function focusForScene(dir, scene, asset, { fetchFn } = {}) {
+  const items = scene.focus?.length ? scene.focus : (asset.mediaVideo ? [] : scene.bullets ?? []);
+  if (!asset.mediaFile || !items.length) return null;
+  let image = asset.mediaFile;
+  if (asset.mediaVideo) {
+    const rel = `assets/focus-frame-${createHash('sha1').update(`${asset.mediaFile}@${asset.mediaVideo.start}`).digest('hex').slice(0, 10)}.png`;
+    image = existsSync(join(dir, rel)) ? rel : await grabFrame(dir, asset.mediaFile, asset.mediaVideo.start + 0.3, rel);
+    if (!image) return null;
+  }
+  const r = await locateFocus(dir, image, items, { fetchFn });
+  if (r) { asset.mediaSize = r.size; asset.mediaFocus = r.focus; }
+  return r;
+}
 
 const key = (...parts) => createHash('sha1').update(JSON.stringify(parts)).digest('hex').slice(0, 12);
 
@@ -94,17 +125,16 @@ export async function locateFocus(dir, mediaFile, items, { fetchFn = fetch } = {
  * Never throws: a scene whose lookup fails just keeps the plain zoom.
  */
 export async function focusPhase(dir, plan, assets, { onProgress = () => {}, fetchFn } = {}) {
-  // Video clips need only their size (the footage moves by itself).
+  // Video clips need their size (and targets only when a scene asks for them).
   for (const [i, a] of assets.entries()) {
     if (a.mediaVideo && a.mediaFile) a.mediaSize = await probeSize(join(dir, a.mediaFile)).catch(() => undefined);
   }
-  const todo = plan.scenes.map((s, i) => (assets[i].mediaFile && !assets[i].mediaVideo && s.bullets?.length ? i : -1)).filter(i => i >= 0);
+  const todo = plan.scenes.map((s, i) => (assets[i].mediaFile && (s.focus?.length || (!assets[i].mediaVideo && s.bullets?.length)) ? i : -1)).filter(i => i >= 0);
   if (!todo.length) return;
   onProgress(`Finding zoom targets in ${todo.length} screenshot(s)…`);
   for (const i of todo) {
     try {
-      const r = await locateFocus(dir, assets[i].mediaFile, plan.scenes[i].bullets, { fetchFn });
-      if (r) { assets[i].mediaSize = r.size; assets[i].mediaFocus = r.focus; }
+      await focusForScene(dir, plan.scenes[i], assets[i], { fetchFn });
     } catch (err) {
       console.warn(`[explainer] zoom targets for scene ${i + 1} failed: ${err.message}`);
     }
