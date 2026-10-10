@@ -79,10 +79,13 @@ function interaction(id, keys, { W, Hv, duration, accent }) {
     js.push(`  tl.to("#${id}-cursor", { x: ${r2(k.cx - 4 * inv)}, y: ${r2(k.cy - 2 * inv)}, scale: ${inv}, duration: ${r2(Math.max(0.4, k.dur * 0.85))}, ease: "power2.inOut" }, ${r2(k.at)});`);
     js.push(`  tl.to("#${id}-cursor", { scale: ${r2(inv * 0.82)}, duration: 0.09, ease: "power1.in" }, ${click});`);
     js.push(`  tl.to("#${id}-cursor", { scale: ${inv}, duration: 0.14, ease: "power1.out" }, ${r2(click + 0.09)});`);
-    js.push(`  tl.fromTo("#${id}-ring${n}", { scale: ${r2(0.3 * inv)}, opacity: 0.9 }, { scale: ${r2(1.6 * inv)}, opacity: 0, duration: 0.55, ease: "power2.out" }, ${click});`);
-    const off = r2(Math.min(k.next - 0.15, duration - 0.3));
-    js.push(`  tl.fromTo("#${id}-spot${n}", { opacity: 0 }, { opacity: 1, duration: 0.3, ease: "power1.out" }, ${r2(click + 0.05)});`);
-    if (off > click + 0.4) js.push(`  tl.to("#${id}-spot${n}", { opacity: 0, duration: 0.25, ease: "power1.in" }, ${off});`);
+    // immediateRender: false — otherwise gsap paints each ring's "from" state at t=0.
+    js.push(`  tl.fromTo("#${id}-ring${n}", { scale: ${r2(0.3 * inv)}, opacity: 0.9 }, { scale: ${r2(1.6 * inv)}, opacity: 0, duration: 0.55, ease: "power2.out", immediateRender: false }, ${click});`);
+    // Each spotlight fades before the next target's (they'd stack otherwise); the last one stays until the pull-back.
+    const last = n === keys.length - 1;
+    const off = r2(last ? Math.min(Math.max(k.at + 1.6, duration - 1.3), duration - 0.3) : Math.max(click + 0.35, k.next - 0.1));
+    js.push(`  tl.fromTo("#${id}-spot${n}", { opacity: 0 }, { opacity: 1, duration: 0.25, ease: "power1.out", immediateRender: false }, ${r2(click + 0.05)});`);
+    js.push(`  tl.to("#${id}-spot${n}", { opacity: 0, duration: 0.2, ease: "power1.in" }, ${off});`);
   });
   const end = Math.max(keys.at(-1).at + 1.6, duration - 1.3);
   if (end + 0.8 <= duration - 0.1) js.push(`  tl.to("#${id}-cursor", { x: ${r2(W * 0.72)}, y: ${r2(Hv * 0.74)}, scale: 1, duration: 0.8, ease: "power2.inOut" }, ${r2(end)});`);
