@@ -132,3 +132,13 @@ describe('staticCheck catches silent no-op selectors and emoji', () => {
     assert.match(staticCheck(good('scene-1', 'Hi 😊'), 'scene-1', 'Inter').join(), /emoji/);
   });
 });
+
+describe('timingProblems', () => {
+  it('flags chained / delayed / late tweens and accepts absolute ones', async () => {
+    const { timingProblems } = await import('../src/agents/explainer/sceneWriter.js');
+    assert.deepEqual(timingProblems('tl.fromTo("#a", { x: 0 }, { x: 1, duration: 0.5 }, 0.4);', 3.5), []);
+    assert.match(timingProblems('tl.fromTo("#a", { x: 0 }, { x: 1, duration: 0.5 });', 3.5)[0], /absolute start time/);
+    assert.match(timingProblems('tl.to("#a", { x: 1, duration: 0.5, delay: 1 });', 3.5)[0], /delay/);
+    assert.match(timingProblems('tl.to("#a", { x: 1, duration: 0.5 }, 3.4);', 3.5)[0], /only 3\.50s/);
+  });
+});

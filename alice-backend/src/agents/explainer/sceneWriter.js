@@ -135,7 +135,37 @@ export function extractHtml(reply) {
  * Cheap pre-check rules that lint/check don't (reliably) enforce.
  * Returns a list of human-readable problems ([] = pass).
  */
-export function staticCheck(html, compId, font, scene = null, { logoFile, allowImgSrc = [] } = {}) {
+/**
+ * Every tl.to/from/fromTo needs an absolute start time (its last argument)
+ * inside the scene: without one gsap chains tweens back to back — a title
+ * scene once played its headline 3 s late, over the next scene.
+ * Returns problem strings.
+ */
+export function timingProblems(js, duration) {
+  const out = [];
+  const re = /\btl\.(to|from|fromTo)\(/g;
+  let m;
+  while ((m = re.exec(js))) {
+    let depth = 1, i = re.lastIndex, inStr = null;
+    for (; i < js.length && depth; i++) {
+      const c = js[i];
+      if (inStr) { if (c === inStr && js[i - 1] !== '\\') inStr = null; continue; }
+      if (c === '"' || c === "'" || c === '`') inStr = c;
+      else if (c === '(' || c === '[' || c === '{') depth++;
+      else if (c === ')' || c === ']' || c === '}') depth--;
+    }
+    const call = js.slice(m.index, i);
+    const pos = /\}\s*,\s*(-?[\d.]+)\s*\)$/.exec(call);
+    const sel = /\(\s*(["'`][^"'`]*["'`])/.exec(call)?.[1] ?? 'a tween';
+    if (/\bdelay\s*:/.test(call)) out.push(`${sel}: don't use delay — put the start time (seconds) as the tween's last argument`);
+    else if (!pos) out.push(`${sel}: every tween needs its absolute start time in seconds as the last argument, e.g. tl.fromTo(sel, {…}, {…}, 0.4)`);
+    else if (duration && Number(pos[1]) >= duration - 0.2) out.push(`${sel}: starts at ${pos[1]}s, but the scene is only ${duration.toFixed(2)}s long`);
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
+export function staticCheck(html, compId, font, scene = null, { logoFile, allowImgSrc = [], duration } = {}) {
   const problems = [];
   if (!html) return ['no HTML file found in the reply'];
   if (scene) {
@@ -159,6 +189,7 @@ export function staticCheck(html, compId, font, scene = null, { logoFile, allowI
   if (/url\(|https?:\/\//i.test(html)) problems.push('no url() or http(s) links');
   if (/Math\.random|Date\.now|new Date|setTimeout|setInterval|requestAnimationFrame|repeat:\s*-1/.test(html)) problems.push('no Math.random/Date/timers/infinite repeats');
   if (/<br\b/i.test(html)) problems.push('no <br>');
+  problems.push(...timingProblems((html.match(/<script[\s\S]*?<\/script>/gi) ?? []).join('\n'), duration));
   if (/\p{Extended_Pictographic}/u.test(html)) problems.push('no emoji — draw icons with CSS shapes or inline SVG');
   // Selectors pointing at ids that don't exist silently style/animate nothing
   // (a real scene targeted "#scene-6 .headline" → all text rendered unstyled).
@@ -250,7 +281,7 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
     const candidates = [];
     for (const s of pending) {
       s.rounds = round + 1;
-      s.problems = staticCheck(s.html, s.compId, font, s.scene, { logoFile: sceneInfo[s.index].logoFile });
+      s.problems = staticCheck(s.html, s.compId, font, s.scene, { logoFile: sceneInfo[s.index].logoFile, duration: sceneInfo[s.index].duration });
       if (s.problems.length) writeFileSync(file(s), fallback(s));
       else { writeFileSync(file(s), s.html); candidates.push(s); }
     }
