@@ -1,7 +1,22 @@
 {
-  "_comment": "Spoken-only pronunciation fixes. Key = word as written (case-insensitive, whole word). Value = a pronunciation hint like \"thee-ah-cast\" (Kokoro gets it joined, \"Theeahcast\"; the LTX presenter gets \"Thee-ah-cast\"), or {\"tts\": \"...\", \"presenter\": \"...\"} to set each engine explicitly. Captions/on-screen text keep the original spelling. Per-video overrides come from the chat (\"X is pronounced Y\"). Verified by ear 2026-10-09: TheiaCast is \"THEE-uh-cast\" (Theia, the Greek Titaness) \u2014 Kokoro: \"Theea cast\"; LTX presenter: \"Thee-ah-cast\"; VoxCPM2 (not wired in yet): \"Theea cast\" when cloning bf_alice, \"Thia-cast\" with its default voice.",
+  "_comment": "Spoken-only pronunciation fixes. Key = word as written (case-insensitive, whole word). Value = a pronunciation hint like \"thee-ah-cast\" (Kokoro gets it joined, \"Theeahcast\"; the LTX presenter gets \"Thee-ah-cast\"), or {\"tts\": \"...\", \"presenter\": \"...\"} to set each engine explicitly. Captions/on-screen text keep the original spelling. Per-video overrides come from the chat (\"X is pronounced Y\"). Verified by ear 2026-10-09: TheiaCast is \"THEE-uh-cast\" (Theia, the Greek Titaness) — Kokoro: \"Theea cast\"; LTX presenter: \"Thee-ah-cast\"; VoxCPM2 (not wired in yet): \"Theea cast\" when cloning bf_alice, \"Thia-cast\" with its default voice. 2026-10-10: VoxCPM2 varies per take, so lines are transcribed and re-recorded (assets.js speakChecked). 'tts' lists alternatives tried in order on re-takes; 'heard' = how a right take transcribes (the approved clone take: \"TheaCast\"), 'notHeard' = known-wrong transcriptions (\"theeacast\" = a literal thee-ee-ay, reported at the end of conv 210).",
   "TheiaCast": {
-    "tts": "Theea cast",
-    "presenter": "Thee-ah-cast"
+    "tts": [
+      "Theea cast",
+      "Thea cast",
+      "Thia-cast"
+    ],
+    "presenter": "Thee-ah-cast",
+    "heard": [
+      "TheaCast",
+      "Thea Cast",
+      "Thearcast"
+    ],
+    "notHeard": [
+      "Theeacast",
+      "VA Cast",
+      "Satya Cast",
+      "Gerakast"
+    ]
   }
 }

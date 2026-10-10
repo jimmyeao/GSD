@@ -245,5 +245,6 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
     }
     pending = next;
   }
-  return states.map(s => ({ index: s.index, source: s.source, rounds: s.rounds }));
+  // Last problems kept for report.json, so a scene that fell back explains why.
+  return states.map(s => ({ index: s.index, source: s.source, rounds: s.rounds, ...(s.source !== 'llm' && s.problems?.length ? { problems: s.problems.slice(0, 5).map(p => String(p).slice(0, 200)) } : {}) }));
 }

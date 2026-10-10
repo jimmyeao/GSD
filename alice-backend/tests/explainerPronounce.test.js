@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalizeRespelling, cleanLexicon, applyPronunciations, loadLexicon, lexiconFor, presenterRespelling } from '../src/agents/explainer/pronounce.js';
+import { normalizeRespelling, cleanLexicon, applyPronunciations, loadLexicon, lexiconFor, presenterRespelling, mispronunciation } from '../src/agents/explainer/pronounce.js';
 import { normalizePlan } from '../src/agents/explainer/planner.js';
 
 describe('pronunciations', () => {
@@ -45,10 +45,24 @@ describe('speakChecked', () => {
     let n = 0;
     const speakFn = async () => Buffer.from(`take${++n}`);
     const transcribeFn = async () => heardAs[n - 1].split(' ').map(text => ({ text }));
-    const checks = [{ word: 'TheiaCast', sounds: ['Theea cast', 'Thee-ah-cast'], count: 1 }];
+    const checks = [{ word: 'TheiaCast', good: ['TheiaCast', 'TheaCast'], bad: ['Theeacast'], count: 1 }];
     const buf = await speakChecked(dir, speakFn, checks, 'scene 1', () => {}, { transcribeFn });
     assert.equal(buf.toString(), 'take3');
     assert.equal(n, 3);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('mispronunciation', () => {
+  const check = { good: ['TheiaCast', 'TheaCast'], bad: ['Theeacast'], count: 2 };
+  it('passes right takes and catches the literal thee-ee-ay reading', () => {
+    assert.ok(mispronunciation('Visit TheaCast.com to download TheaCast'.split(' '), check) <= 0.15);
+    assert.ok(mispronunciation('Visit theeacast.com to download the eacast'.split(' '), check) > 0.15);
+    assert.ok(mispronunciation('Visit TheaCast.com to download the eacast'.split(' '), check) > 0.15); // one bad occurrence fails the line
+  });
+  it('re-takes cycle through tts alternatives', () => {
+    const lex = { TheiaCast: { tts: ['Theea cast', 'Thea cast'] } };
+    assert.equal(lexiconFor(lex, 'tts', 1).TheiaCast, 'Thea cast');
+    assert.equal(lexiconFor(lex, 'tts', 2).TheiaCast, 'Theea cast');
   });
 });

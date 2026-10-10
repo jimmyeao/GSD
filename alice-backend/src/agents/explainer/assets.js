@@ -113,7 +113,9 @@ export async function voicePhase(dir, plan, { voice, images = [], onProgress = (
       if (!existsSync(join(dir, rel))) {
         // VoxCPM2 varies take to take; lines with a lexicon word are checked by ear-proxy.
         const checks = engine === 'voxcpm' ? wordsToCheck(scene.speech, lexicon) : [];
-        writeFileSync(join(dir, rel), await speakChecked(dir, () => speak(a.spoken), checks, `scene ${i + 1}`, onProgress));
+        // Re-takes cycle through the lexicon's alternative respellings.
+        const takeText = (take) => (take === 1 ? a.spoken : applyPronunciations(scene.speech, lexiconFor(lexicon, 'tts', take - 1)));
+        writeFileSync(join(dir, rel), await speakChecked(dir, (take) => speak(takeText(take)), checks, `scene ${i + 1}`, onProgress));
       }
       a.ttsFile = rel;
       a.ttsDur = await probeDuration(join(dir, rel));
@@ -167,7 +169,7 @@ export async function speakChecked(dir, speakFn, checks, label, onProgress = () 
     mkdirSync(work, { recursive: true });
     writeFileSync(join(work, `take.${ext}`), buf);
     const heard = (await transcribeFn(work, `take.${ext}`)).map(w => w.text);
-    const score = Math.max(...checks.map(c => mispronunciation(heard, c.word, c.sounds, c.count)));
+    const score = Math.max(...checks.map(c => mispronunciation(heard, c)));
     if (!best || score < best.score) best = { buf, score, take };
     if (score <= SAID_RIGHT) break;
     onProgress(`Re-recording ${label}: "${checks.map(c => c.word).join('", "')}" was heard as "${heard.join(' ').slice(0, 80)}"…`);

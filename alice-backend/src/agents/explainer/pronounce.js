@@ -54,20 +54,32 @@ export function cleanLexicon(raw) {
     const w = word.trim();
     if (!w || w.startsWith('_') || w.length > 60 || Object.keys(out).length >= MAX_ENTRIES) continue;
     if (typeof hint === 'string' && normalizeRespelling(hint)) out[w] = hint.trim();
-    else if (hint && typeof hint === 'object' && (typeof hint.tts === 'string' || typeof hint.presenter === 'string')) {
-      out[w] = { ...(typeof hint.tts === 'string' ? { tts: hint.tts.trim() } : {}), ...(typeof hint.presenter === 'string' ? { presenter: hint.presenter.trim() } : {}) };
+    else if (hint && typeof hint === 'object') {
+      // tts may list alternatives (retried in order when a take is heard wrong);
+      // heard / notHeard = how right and wrong takes transcribe (whisper).
+      const strs = (v) => (Array.isArray(v) ? v : [v]).filter(x => typeof x === 'string' && x.trim()).map(x => x.trim()).slice(0, 6);
+      const e = {};
+      if (strs(hint.tts).length) e.tts = Array.isArray(hint.tts) ? strs(hint.tts) : strs(hint.tts)[0];
+      if (typeof hint.presenter === 'string' && hint.presenter.trim()) e.presenter = hint.presenter.trim();
+      if (strs(hint.heard).length) e.heard = strs(hint.heard);
+      if (strs(hint.notHeard).length) e.notHeard = strs(hint.notHeard);
+      if (e.tts || e.presenter) out[w] = e;
     }
   }
   return out;
 }
 
-/** The respelling map for one engine ('tts' | 'presenter'). */
-export function lexiconFor(lexicon, engine) {
+/**
+ * The respelling map for one engine ('tts' | 'presenter'). `variant` picks
+ * among listed tts alternatives (0 = preferred) — used for re-takes.
+ */
+export function lexiconFor(lexicon, engine, variant = 0) {
   const out = {};
   for (const [w, v] of Object.entries(lexicon)) {
+    const pick = (x) => (Array.isArray(x) ? x[variant % x.length] : x);
     const r = typeof v === 'string'
       ? (engine === 'presenter' ? presenterRespelling(v) : normalizeRespelling(v))
-      : (v[engine] ?? '');
+      : (pick(v[engine]) ?? '');
     if (r) out[w] = r;
   }
   return out;
@@ -119,22 +131,26 @@ function editDistance(a, b) {
 }
 
 /**
- * How far the transcript is from saying `word` right (0 = perfect, ~0.25+ =
- * wrong). Compares every 1-3 word window of the transcript with the word's
- * spelling and its respellings (what a correct take transcribes as).
- * @param {string[]} heard   transcript words
- * @param {string} word      e.g. "TheiaCast"
- * @param {string[]} sounds  respellings, e.g. ["Theea cast", "Thee-ah-cast"]
+ * How far the transcript is from saying the word right (0 = perfect, ~0.25+
+ * = wrong). Every 1-3 word window of the transcript is compared with how a
+ * correct take transcribes (`good`); a window closer to a known-wrong form
+ * (`bad`, e.g. "theeacast" for a literal "thee-ee-ay") counts as wrong —
+ * edit distance alone can't tell those apart.
+ * @param {string[]} heard  transcript words
+ * @param {{good: string[], bad?: string[], count?: number}} check
  */
-export function mispronunciation(heard, word, sounds = [], occurrences = 1) {
-  const targets = [word, ...sounds].map(letters).filter(Boolean);
+export function mispronunciation(heard, { good, bad = [], count: occurrences = 1 }) {
+  const targets = good.map(letters).filter(Boolean);
+  const wrong = bad.map(letters).filter(Boolean);
   const w = heard.map(letters);
   const windows = [];
   for (let i = 0; i < w.length; i++) {
     for (let n = 1; n <= 3 && i + n <= w.length; n++) {
       const cand = w.slice(i, i + n).join('');
       if (!cand) continue;
-      windows.push({ i, n, d: Math.min(...targets.map(t => editDistance(cand, t) / t.length)) });
+      const d = Math.min(...targets.map(t => editDistance(cand, t) / t.length));
+      const dBad = wrong.length ? Math.min(...wrong.map(t => editDistance(cand, t) / t.length)) : Infinity;
+      windows.push({ i, n, d: dBad < d ? 1 : d });
     }
   }
   // Every occurrence must be said right: score = the worst of the best
@@ -155,7 +171,10 @@ export function wordsToCheck(text, lexicon) {
   return Object.entries(lexicon)
     .filter(([w]) => new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(w)}(?![\\p{L}\\p{N}])`, 'iu').test(String(text ?? '')))
     .map(([w, v]) => ({
-      word: w, sounds: typeof v === 'string' ? [v] : Object.values(v).filter(Boolean),
+      word: w,
+      // What a right take transcribes as: listed "heard" forms if any, else the word and its respellings.
+      good: [w, ...(typeof v === 'string' ? [v] : (v.heard ?? [v.tts, v.presenter].flat().filter(Boolean)))],
+      bad: typeof v === 'string' ? [] : (v.notHeard ?? []),
       count: (String(text).match(new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(w)}(?![\\p{L}\\p{N}])`, 'giu')) ?? []).length,
     }));
 }
