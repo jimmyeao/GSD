@@ -138,6 +138,10 @@ function demote(plan, assets, i) {
   delete assets[i].clipFile;
 }
 
+// A remote worker that hasn't answered for this long is treated as gone
+// (its clips are retried locally) rather than waiting out the 30 min timeout.
+const WORKER_UNREACHABLE_MS = 180_000;
+
 /** Generate (or reuse) one ComfyUI output at `rel`. */
 async function cached(dir, rel, make) {
   if (existsSync(join(dir, rel))) return rel;
@@ -165,6 +169,7 @@ export async function presenterPhase(dir, plan, assets, { endpoint, ckpt, worker
         const out = await generateTalkingHead(endpoint, {
           portrait, voiceRef, visual: presenterVisual(plan.presenter.description),
           speech: assets[i].presenterSpoken, sounds: PRESENTER_SOUNDS, seconds: assets[i].clipSeconds, seed, ckpt,
+          ...(workerName !== 'local' ? { unreachableMs: WORKER_UNREACHABLE_MS } : {}),
         });
         const buf = await fetchComfyOutput(endpoint, out);
         dropCache('videos', out.filename);
@@ -174,6 +179,8 @@ export async function presenterPhase(dir, plan, assets, { endpoint, ckpt, worker
     } catch (err) {
       onProgress(`⚠ presenter clip for scene ${i + 1} failed on ${workerName} (${err.message})`);
       failed.push(i);
+      // A dead worker would fail every remaining clip slowly — hand them all back now.
+      if (err.workerDown) { failed.push(...live.slice(k + 1)); break; }
     }
   }
   return failed;

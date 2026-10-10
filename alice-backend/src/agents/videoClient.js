@@ -682,7 +682,12 @@ function buildLTXFirstLastFrameWorkflow(prompt, { firstFrameName, lastFrameName,
  * When found, immediately downloads and caches the video locally
  * (so ComfyUI can be safely killed after this returns).
  */
-export async function pollForVideo(endpoint, clientId, promptId, timeoutMs, onProgress, onPromptExpanded) {
+/**
+ * opts.unreachableMs — remote workers only: give up once the worker hasn't
+ * answered for this long, or has forgotten the prompt (restarted), instead
+ * of waiting out the whole timeout. The error carries workerDown = true.
+ */
+export async function pollForVideo(endpoint, clientId, promptId, timeoutMs, onProgress, onPromptExpanded, { unreachableMs } = {}) {
   const { writeFileSync, mkdirSync } = await import('node:fs');
   const { join, dirname } = await import('node:path');
   const { fileURLToPath } = await import('node:url');
@@ -710,6 +715,10 @@ export async function pollForVideo(endpoint, clientId, promptId, timeoutMs, onPr
     : () => {};
 
   const deadline = Date.now() + timeoutMs;
+  let lastContact = Date.now();
+  let lastQueueCheck = Date.now();
+  let missing = 0;
+  const workerDown = (why) => Object.assign(new Error(`worker ${endpoint} ${why}`), { workerDown: true });
   try {
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 3000));
@@ -719,12 +728,29 @@ export async function pollForVideo(endpoint, clientId, promptId, timeoutMs, onPr
       histRes = await fetch(`${endpoint}/history/${promptId}`, {
         signal: AbortSignal.timeout(5_000),
       });
-    } catch { continue; } // ComfyUI might be busy, retry
+    } catch {
+      // ComfyUI might be busy, retry — unless a remote worker has gone quiet.
+      if (unreachableMs && Date.now() - lastContact > unreachableMs) throw workerDown(`not responding for ${Math.round((Date.now() - lastContact) / 1000)}s`);
+      continue;
+    }
+    lastContact = Date.now();
     if (!histRes.ok) continue;
 
     const history = await histRes.json();
     const entry = history[promptId];
-    if (!entry) continue;
+    if (!entry) {
+      // Not finished — but is it still queued? A restarted worker forgets it.
+      if (unreachableMs && Date.now() - lastQueueCheck > 30_000) {
+        lastQueueCheck = Date.now();
+        try {
+          const q = await (await fetch(`${endpoint}/queue`, { signal: AbortSignal.timeout(5_000) })).json();
+          const queued = [...(q.queue_running ?? []), ...(q.queue_pending ?? [])].some(item => item?.[1] === promptId);
+          missing = queued ? 0 : missing + 1;
+          if (missing >= 2) throw workerDown('no longer has the job (restarted?)');
+        } catch (err) { if (err.workerDown) throw err; }
+      }
+      continue;
+    }
 
     if (entry.status?.status_str === 'error') {
       const msgs = entry.status?.messages || [];

@@ -535,7 +535,7 @@ async function runTalkingHeadJob(id, opts) {
   if (!worker) return;
   try {
     job.worker = worker.name;
-    const vidData = await generateTalkingHead(worker.endpoint, { ...opts, ckpt: worker.files[0] });
+    const vidData = await generateTalkingHead(worker.endpoint, { ...opts, ckpt: worker.files[0], ...(worker.local ? {} : { unreachableMs: 180_000 }) });
     const cachedPath = join(VIDEOS_DIR, vidData.filename);
     const buffer = readFileSync(cachedPath);
     try { unlinkSync(cachedPath); } catch { /* not fatal — file just lingers */ }

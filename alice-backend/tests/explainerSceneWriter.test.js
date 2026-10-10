@@ -19,6 +19,14 @@ describe('extractHtml', () => {
 
 describe('staticCheck', () => {
   it('passes a valid file', () => assert.deepEqual(staticCheck(good('scene-1'), 'scene-1', 'Inter'), []));
+  it('requires the logo when given, and allows no other image', () => {
+    const logo = { logoFile: 'assets/media-img3.png' };
+    const withLogo = good('scene-1').replace('<h1', '<img id="scene-1-logo" src="assets/media-img3.png" alt=""><h1');
+    assert.deepEqual(staticCheck(withLogo, 'scene-1', 'Inter', null, logo), []);
+    assert.match(staticCheck(good('scene-1'), 'scene-1', 'Inter', null, logo).join(' '), /include the logo/);
+    assert.match(staticCheck(withLogo.replace('<h1', '<img src="assets/x.png"><h1'), 'scene-1', 'Inter', null, logo).join(' '), /other than the logo/);
+    assert.match(staticCheck(withLogo, 'scene-1', 'Inter').join(' '), /no <img>/);
+  });
   it('flags media, network, randomness, bad fonts and wrong ids', () => {
     const bad = good('scene-1')
       .replace('<h1', '<img src="x.png"><h1')

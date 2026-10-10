@@ -7,8 +7,8 @@
  * brief/source material/answers don't support, so the planner can be asked
  * to fix them — and anything still unsupported is removed.
  *
- * Checked: tokens containing digits (prices, percentages, codes, counts)
- * and a list of common marketing claims. Prose claims without numbers can't
+ * Checked: tokens containing digits (prices, percentages, codes, counts),
+ * a list of common marketing / absolute claims, and "zero <thing>". Prose claims without numbers can't
  * be verified this way; the prompt rule still covers those.
  */
 
@@ -16,7 +16,13 @@ const RISKY_PHRASES = [
   'free trial', 'trial', 'discount', '% off', 'percent off', 'promo code', 'coupon', 'voucher',
   'money-back', 'money back', 'guarantee', 'guaranteed', 'award-winning', 'award winning', 'number one', '#1',
   'certified', 'limited time', 'limited-time', 'lifetime', 'free shipping', 'free delivery', 'no credit card',
+  // Absolute / superlative claims (Qwen added "Zero latency", "Zero downtime")
+  'no downtime', 'never goes down', 'never fails', 'always on', 'always-on', 'uptime', 'unlimited',
+  'best-in-class', 'best in class', 'industry-leading', 'industry leading', 'market-leading', 'world-class', 'world class',
+  'fastest', 'cheapest', 'most secure', 'bank-grade', 'military-grade', 'enterprise-grade', 'bulletproof', 'flawless',
 ];
+// "zero <thing>" is almost always an absolute claim ("zero latency", "zero downtime").
+const RISKY_PATTERNS = [/\bzero[- ][a-z]+/g];
 
 const norm = (s) => String(s ?? '').toLowerCase().replace(/(\d),(?=\d{3})/g, '$1').replace(/[“”"‘’']/g, '').replace(/\s+/g, ' ');
 
@@ -49,6 +55,9 @@ export function findUnsupportedClaims(plan, factsText) {
       }
       for (const phrase of RISKY_PHRASES) {
         if (t.includes(phrase) && !facts.includes(phrase)) issues.push({ scene: i, field, claim: phrase, text });
+      }
+      for (const re of RISKY_PATTERNS) {
+        for (const [claim] of t.matchAll(re)) if (!facts.includes(claim)) issues.push({ scene: i, field, claim, text });
       }
     }
   });

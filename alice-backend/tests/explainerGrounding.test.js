@@ -15,6 +15,11 @@ describe('findUnsupportedClaims', () => {
     const claims = findUnsupportedClaims(plan, brief).map(x => x.claim).sort();
     assert.deepEqual([...new Set(claims)].sort(), ['10%', 'coffee10', '% off', 'free trial', 'trial'].sort());
   });
+  it('flags absolute claims ("zero latency", "industry-leading") unless the facts say them', () => {
+    const p = { scenes: [{ speech: 'Industry-leading control.', headline: '', bullets: ['Zero latency', 'Zero downtime'] }] };
+    assert.deepEqual(findUnsupportedClaims(p, brief).map(x => x.claim).sort(), ['industry-leading', 'zero downtime', 'zero latency']);
+    assert.deepEqual(findUnsupportedClaims(p, brief + ' Industry-leading, zero latency and zero downtime.'), []);
+  });
   it('accepts numbers that appear in the brief (incl. thousands separators)', () => {
     assert.deepEqual(findUnsupportedClaims({ scenes: [{ speech: 'Only 59 pounds, with 1,200 recipes.', bullets: [] }] }, brief), []);
   });

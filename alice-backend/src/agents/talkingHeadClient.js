@@ -125,13 +125,14 @@ function buildIdLoraWorkflow(prompt, imageName, refAudioName, {
  *   voiceRef   {name, dataUrl}  ~5s speech sample whose voice is cloned
  *   visual / speech / sounds   prompt sections (see buildIdLoraPrompt)
  *   seconds, width, height, seed, timeoutMs, onProgress
+ *   unreachableMs  remote workers: fail fast if the worker stops answering
  *   ckpt   LTX-2.3 checkpoint file (default full BF16; the 24 GB laptop
  *          worker uses ltx-2.3-22b-dev-fp8.safetensors)
  * @returns {Promise<{filename, subfolder, type}>} same shape as videoClient's generators
  */
 export async function generateTalkingHead(endpoint, {
   portrait, voiceRef, visual, speech, sounds,
-  seconds = 8, width = 1280, height = 720, seed, timeoutMs = 1_800_000, onProgress, ckpt,
+  seconds = 8, width = 1280, height = 720, seed, timeoutMs = 1_800_000, onProgress, ckpt, unreachableMs,
 }) {
   const imageName = await uploadMediaToComfy(endpoint, portrait.dataUrl, portrait.name);
   const refAudioName = await uploadMediaToComfy(endpoint, voiceRef.dataUrl, voiceRef.name);
@@ -141,5 +142,5 @@ export async function generateTalkingHead(endpoint, {
   const clientId = `alice-talkinghead-${Date.now()}`;
   const promptId = await queueWorkflow(endpoint, workflow, clientId);
   console.log(`[talkingHead] queued: ${promptId} (${seconds}s, ${width}x${height})`);
-  return pollForVideo(endpoint, clientId, promptId, timeoutMs, onProgress);
+  return pollForVideo(endpoint, clientId, promptId, timeoutMs, onProgress, undefined, { unreachableMs });
 }

@@ -65,7 +65,7 @@ Hard rules (violations are rejected):
 - Text must be large and readable: headlines 64-120px, body 36-52px.
 ${ANTI_SECOND_GUESS}`;
 
-export function buildScenePrompt(compId, scene, { palette, font, duration, words }) {
+export function buildScenePrompt(compId, scene, { palette, font, duration, words, logoFile }) {
   const area = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
   const cues = (words ?? []).slice(0, 60).map(w => `${w.start.toFixed(2)}s "${w.text}"`).join(', ');
   const context = {
@@ -83,7 +83,8 @@ Palette: text ${palette.text}, accent ${palette.accent}, background ${palette.bg
 Headline: ${scene.headline || '(none)'}
 Bullets: ${scene.bullets.length ? scene.bullets.map(b => `"${b}"`).join(', ') : '(none)'}
 Motion idea: ${scene.visual_idea || 'clean, confident entrances'}
-${cues ? `Spoken word timings (scene-local) — reveal each bullet near the word it relates to: ${cues}` : ''}`;
+${cues ? `Spoken word timings (scene-local) — reveal each bullet near the word it relates to: ${cues}` : ''}${logoFile ? `
+Brand logo: include it as <img id="${compId}-logo" src="${logoFile}" alt=""> — the only image allowed. Give it a CSS height of 90-140px with width auto (never stretch it), place it prominently above or beside the headline, and animate it in.` : ''}`;
   const system = RULES.replaceAll('COMP_ID', compId).replaceAll('CANVAS_W', String(area.width)).replaceAll('CANVAS_H', String(area.height));
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
@@ -101,7 +102,7 @@ export function extractHtml(reply) {
  * Cheap pre-check rules that lint/check don't (reliably) enforce.
  * Returns a list of human-readable problems ([] = pass).
  */
-export function staticCheck(html, compId, font, scene = null) {
+export function staticCheck(html, compId, font, scene = null, { logoFile } = {}) {
   const problems = [];
   if (!html) return ['no HTML file found in the reply'];
   if (scene) {
@@ -115,7 +116,10 @@ export function staticCheck(html, compId, font, scene = null) {
   if (!/<template>[\s\S]*<\/template>/i.test(html)) problems.push('everything must be inside <template>…</template>');
   if (!html.includes(`data-composition-id="${compId}"`)) problems.push(`root must have data-composition-id="${compId}"`);
   if (!new RegExp(`window\\.__timelines\\[["']${compId}["']\\]\\s*=`).test(html)) problems.push(`register the timeline as window.__timelines["${compId}"] = tl`);
-  if (/<(img|video|audio|iframe|canvas)\b/i.test(html)) problems.push('no <img>/<video>/<audio>/<iframe>/<canvas> elements');
+  // The brand logo is the one image allowed (title/outro), and then required.
+  const logoTag = logoFile ? new RegExp(`<img\\b[^>]*\\bsrc=["']${logoFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}["'][^>]*>`, 'gi') : null;
+  if (logoTag && !logoTag.test(html)) problems.push(`include the logo exactly as <img id="${compId}-logo" src="${logoFile}" alt=""> (sized with CSS, never stretched)`);
+  if (/<(img|video|audio|iframe|canvas)\b/i.test(logoTag ? html.replace(logoTag, '') : html)) problems.push(logoFile ? `no <img>/<video>/<audio>/<iframe>/<canvas> elements other than the logo` : 'no <img>/<video>/<audio>/<iframe>/<canvas> elements');
   if (/url\(|https?:\/\//i.test(html)) problems.push('no url() or http(s) links');
   if (/Math\.random|Date\.now|new Date|setTimeout|setInterval|requestAnimationFrame|repeat:\s*-1/.test(html)) problems.push('no Math.random/Date/timers/infinite repeats');
   if (/<br\b/i.test(html)) problems.push('no <br>');
@@ -175,7 +179,7 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
   const style = resolveStyle(plan);
   const states = plan.scenes.map((scene, i) => ({
     index: i, compId: `scene-${i}`, scene, rounds: 0, done: false, source: 'fallback',
-    messages: buildScenePrompt(`scene-${i}`, scene, { palette, font, duration: sceneInfo[i].duration, words: sceneInfo[i].words }),
+    messages: buildScenePrompt(`scene-${i}`, scene, { palette, font, duration: sceneInfo[i].duration, words: sceneInfo[i].words, logoFile: sceneInfo[i].logoFile }),
     html: '',
   }));
   const file = (s) => join(projectDir, 'compositions', `${s.compId}.html`);
@@ -208,7 +212,7 @@ export async function writeScenes(projectDir, plan, sceneInfo, { llm, check, slo
     const candidates = [];
     for (const s of pending) {
       s.rounds = round + 1;
-      s.problems = staticCheck(s.html, s.compId, font, s.scene);
+      s.problems = staticCheck(s.html, s.compId, font, s.scene, { logoFile: sceneInfo[s.index].logoFile });
       if (s.problems.length) writeFileSync(file(s), fallback(s));
       else { writeFileSync(file(s), s.html); candidates.push(s); }
     }
