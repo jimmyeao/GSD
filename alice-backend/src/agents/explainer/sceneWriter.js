@@ -63,7 +63,8 @@ Hard rules (violations are rejected):
 - font-family must be the given font (plus a generic fallback). No other named fonts.
 - Background stays transparent (the video/image underneath must show through).
 - Keep everything inside the CANVAS_W x CANVAS_H canvas; text must wrap within it (set max-width), never overflow.
-- Text must be large and readable: headlines 64-120px, body 36-52px.
+- Text must be large and readable: headlines 64-120px, body 36-52px, in the palette's text colour (accent only for highlighted words) — never white on a light background.
+- Motion grammar (HyperFrames): entrances ease out (power2.out / power3.out), exits ease in; stagger sibling entrances 0.08-0.12s apart with 0.4-0.6s durations so they overlap; combine properties only when they tell one story (rise + fade, not rise + rotate + scale + blur); let one key element land with a small overshoot (back.out); after the entrances, nothing fully stops — keep a gentle idle (1-2% scale breathing or a slow drift) running until the scene ends.
 ${ANTI_SECOND_GUESS}`;
 
 /**
@@ -224,6 +225,10 @@ export function staticCheck(html, compId, font, scene = null, { logoFile, allowI
  */
 export function belongsTo(f, i, slots) {
   const m = /scene-(\d+)\.html$/.exec(f.sourceFile ?? '');
+  // Contrast is only a defect mid-scene: text fading in/out during a transition always samples low.
+  if (m && f.code === 'contrast_aa_failure' && Number.isFinite(f.time) && slots?.[i]) {
+    return Number(m[1]) === i && f.time >= slots[i].start + 1.2 && f.time <= slots[i].start + slots[i].duration - 0.3;
+  }
   if (m) return Number(m[1]) === i;
   if (f.stage !== 'runtime' || !Number.isFinite(f.time) || !slots?.[i]) return false;
   return f.time >= slots[i].start && f.time < slots[i].start + slots[i].duration;

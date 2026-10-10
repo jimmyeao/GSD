@@ -65,8 +65,8 @@ export function transitionTweens(type, { i, prev, t, D, W, H }) {
         `tl.to("#leak-${i}", { opacity: 0, x: ${r2(W * 0.2)}, duration: ${r2(D * 0.8)}, ease: "power2.out" }, ${r2(t + D * 0.3)});`,
         `tl.fromTo("#bgw-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.inOut" }, ${t});`);
       break;
-    default: // crossfade
-      out.push(`tl.fromTo("#bgw-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.inOut" }, ${t});`);
+    default: // crossfade — a blur crossfade, the motion grammar's "calm" transition
+      out.push(`tl.fromTo("#bgw-${i}", { opacity: 0, filter: "blur(14px)" }, { opacity: 1, filter: "blur(0px)", duration: ${D}, ease: "power1.inOut" }, ${t});`);
   }
   return out;
 }

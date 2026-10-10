@@ -272,6 +272,11 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
     const area = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
     parts.push(`<div id="g-${i}" class="gfx" style="left: ${area.x}px; top: ${area.y}px; width: ${area.width}px; height: ${area.height}px;" data-composition-id="scene-${i}" data-composition-src="compositions/scene-${i}.html" data-start="${slot.start}" data-duration="${held}" data-track-index="2" data-width="${area.width}" data-height="${area.height}"></div>`);
     tweens.push(...sceneTransition(i, slot, st, scene));
+    // HyperFrames motion grammar: "the camera is an actor" / "nothing ever fully
+    // stops" — a slow continuous push on every scene's graphics (and presenter),
+    // so a scene never freezes once its entrances finish.
+    tweens.push(`tl.fromTo("#g-${i}", { scale: 1 }, { scale: 1.03, duration: ${held}, ease: "none" }, ${slot.start});`);
+    if (scene.type === 'presenter') tweens.push(`tl.fromTo("#presenter-${i}", { scale: 1 }, { scale: 1.025, duration: ${slot.duration}, ease: "none" }, ${slot.start});`);
 
     const speechOffset = scene.type === 'presenter' ? slot.start : slot.start + VOICE_LEAD;
     if (a.voiceFile) {

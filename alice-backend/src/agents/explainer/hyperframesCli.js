@@ -86,7 +86,7 @@ export async function lintProject(dir) {
  * Studio-ergonomics warnings and info-level notes are dropped.
  */
 const ACTIONABLE_WARNINGS = new Set(['console_warning', 'console_error', 'gsap_css_transform_conflict']);
-const SCENE_LAYOUT_DEFECTS = new Set(['text_box_overflow', 'text_occluded', 'container_overflow', 'text_clipped', 'text_offscreen', 'content_offscreen']);
+const SCENE_LAYOUT_DEFECTS = new Set(['text_box_overflow', 'text_occluded', 'container_overflow', 'text_clipped', 'text_offscreen', 'content_offscreen', 'contrast_aa_failure']);
 export async function checkProject(dir) {
   const { stdout, stderr } = await hf(['check', '--json'], { cwd: dir, timeoutMs: 300_000 });
   let report;
