@@ -78,7 +78,13 @@ export function loadLexicon(planPronunciations = {}) {
   try {
     if (existsSync(LEXICON_FILE)) shared = JSON.parse(readFileSync(LEXICON_FILE, 'utf8'));
   } catch { /* bad file — ignore rather than break TTS */ }
-  return { ...cleanLexicon(shared), ...cleanLexicon(planPronunciations) };
+  // The shared file holds respellings verified by ear per engine; a plan's
+  // own guess for the same word (e.g. the LLM turning "thee-uh-cast" into
+  // "Theeuhcast") must not override them.
+  const curated = cleanLexicon(shared);
+  const known = new Set(Object.keys(curated).map(k => k.toLowerCase()));
+  const extra = Object.fromEntries(Object.entries(cleanLexicon(planPronunciations)).filter(([k]) => !known.has(k.toLowerCase())));
+  return { ...extra, ...curated };
 }
 
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');

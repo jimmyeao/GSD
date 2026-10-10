@@ -27,4 +27,9 @@ describe('pronunciations', () => {
     const p = normalizePlan({ pronunciations: { Acme: 'ack-mee' }, scenes: [{ type: 'narrated', speech: 'Hi Acme.' }] }, { presenter: false, maxPresenterScenes: 0 });
     assert.deepEqual(p.pronunciations, { Acme: 'ack-mee' });
   });
+  it('verified shared respellings beat a plan entry for the same word', () => {
+    const lex = loadLexicon({ theiacast: 'THEE-uh-cast', Zorbo: 'zor-bo' });
+    assert.equal(applyPronunciations('TheiaCast', lexiconFor(lex, 'tts')), 'Theea cast');
+    assert.equal(applyPronunciations('Zorbo', lexiconFor(lex, 'tts')), normalizeRespelling('zor-bo'));
+  });
 });
