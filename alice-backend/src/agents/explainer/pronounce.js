@@ -97,3 +97,65 @@ export function applyPronunciations(text, lexicon) {
   }
   return out;
 }
+
+// ── Did the voice actually say it right? ────────────────────────────────
+// VoxCPM2 samples, so the same respelling comes out differently line to line
+// ("Theea cast" was heard as "TheaCast", "VA Cast", "Satya Cast" in one video).
+// The pipeline transcribes each take and re-records the ones that drift.
+
+const letters = (s) => String(s ?? '').toLowerCase().replace(/\.(com|io|net|org|ai|app|co|uk)\b/g, '').replace(/[^a-z]/g, '');
+
+function editDistance(a, b) {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0]; row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return row[b.length];
+}
+
+/**
+ * How far the transcript is from saying `word` right (0 = perfect, ~0.25+ =
+ * wrong). Compares every 1-3 word window of the transcript with the word's
+ * spelling and its respellings (what a correct take transcribes as).
+ * @param {string[]} heard   transcript words
+ * @param {string} word      e.g. "TheiaCast"
+ * @param {string[]} sounds  respellings, e.g. ["Theea cast", "Thee-ah-cast"]
+ */
+export function mispronunciation(heard, word, sounds = [], occurrences = 1) {
+  const targets = [word, ...sounds].map(letters).filter(Boolean);
+  const w = heard.map(letters);
+  const windows = [];
+  for (let i = 0; i < w.length; i++) {
+    for (let n = 1; n <= 3 && i + n <= w.length; n++) {
+      const cand = w.slice(i, i + n).join('');
+      if (!cand) continue;
+      windows.push({ i, n, d: Math.min(...targets.map(t => editDistance(cand, t) / t.length)) });
+    }
+  }
+  // Every occurrence must be said right: score = the worst of the best
+  // non-overlapping matches, one per occurrence.
+  windows.sort((a, b) => a.d - b.d);
+  const taken = []; const used = new Set();
+  for (const win of windows) {
+    if (taken.length >= occurrences) break;
+    const span = Array.from({ length: win.n }, (_, k) => win.i + k);
+    if (span.some(x => used.has(x))) continue;
+    span.forEach(x => used.add(x)); taken.push(win.d);
+  }
+  return taken.length < occurrences ? 1 : Math.max(...taken);
+}
+
+/** Respellings of every lexicon word the line contains: [{word, sounds}] */
+export function wordsToCheck(text, lexicon) {
+  return Object.entries(lexicon)
+    .filter(([w]) => new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(w)}(?![\\p{L}\\p{N}])`, 'iu').test(String(text ?? '')))
+    .map(([w, v]) => ({
+      word: w, sounds: typeof v === 'string' ? [v] : Object.values(v).filter(Boolean),
+      count: (String(text).match(new RegExp(`(?<![\\p{L}\\p{N}])${escapeRe(w)}(?![\\p{L}\\p{N}])`, 'giu')) ?? []).length,
+    }));
+}

@@ -23,7 +23,7 @@
  * back to a gradient background, missing music/sfx are simply omitted.
  */
 
-import { writeFileSync, readFileSync, existsSync, unlinkSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -32,8 +32,8 @@ import { voxcpmAvailable, voxcpmSpeak, voxcpmUnload } from '../../services/voxcp
 import { generateImage } from '../comfyClient.js';
 import { generateTalkingHead } from '../talkingHeadClient.js';
 import { generateMusic, generateSfx } from '../musicClient.js';
-import { probeDuration } from './hyperframesCli.js';
-import { loadLexicon, lexiconFor, applyPronunciations } from './pronounce.js';
+import { probeDuration, transcribe } from './hyperframesCli.js';
+import { loadLexicon, lexiconFor, applyPronunciations, wordsToCheck, mispronunciation } from './pronounce.js';
 
 const DATA_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'data');
 const VOICE_SAMPLE_TEXT = 'This is a short sample of my natural speaking voice, recorded for reference.';
@@ -110,7 +110,11 @@ export async function voicePhase(dir, plan, { voice, images = [], onProgress = (
       // Kokoro keys stay as before, so existing projects keep their cache.
       const key = engine === 'kokoro' ? assetKey(chosen, a.spoken) : assetKey(engine, chosen, a.spoken);
       const rel = `assets/tts-${key}.wav`;
-      if (!existsSync(join(dir, rel))) writeFileSync(join(dir, rel), await speak(a.spoken));
+      if (!existsSync(join(dir, rel))) {
+        // VoxCPM2 varies take to take; lines with a lexicon word are checked by ear-proxy.
+        const checks = engine === 'voxcpm' ? wordsToCheck(scene.speech, lexicon) : [];
+        writeFileSync(join(dir, rel), await speakChecked(dir, () => speak(a.spoken), checks, `scene ${i + 1}`, onProgress));
+      }
       a.ttsFile = rel;
       a.ttsDur = await probeDuration(join(dir, rel));
       if (scene.type === 'presenter') a.clipSeconds = clipSecondsFor(a.ttsDur);
@@ -146,6 +150,32 @@ function demote(plan, assets, i) {
 // (its clips are retried locally) rather than waiting out the 30 min timeout.
 const WORKER_UNREACHABLE_MS = 180_000;
 
+const MAX_TAKES = 4;
+const SAID_RIGHT = 0.15; // mispronunciation() score: verified takes ~0.1, wrong ones ~0.4
+
+/**
+ * Record a line; if it contains lexicon words, transcribe each take and
+ * re-record (up to MAX_TAKES) until every one of them is heard right,
+ * keeping the closest take. Returns the WAV buffer.
+ */
+export async function speakChecked(dir, speakFn, checks, label, onProgress = () => {}, { transcribeFn = transcribe, maxTakes = MAX_TAKES, ext = 'wav' } = {}) {
+  if (!checks.length) return speakFn(1);
+  let best = null;
+  for (let take = 1; take <= maxTakes; take++) {
+    const buf = await speakFn(take);
+    const work = join(dir, '.work', `say-${createHash('sha1').update(buf).digest('hex').slice(0, 10)}`);
+    mkdirSync(work, { recursive: true });
+    writeFileSync(join(work, `take.${ext}`), buf);
+    const heard = (await transcribeFn(work, `take.${ext}`)).map(w => w.text);
+    const score = Math.max(...checks.map(c => mispronunciation(heard, c.word, c.sounds, c.count)));
+    if (!best || score < best.score) best = { buf, score, take };
+    if (score <= SAID_RIGHT) break;
+    onProgress(`Re-recording ${label}: "${checks.map(c => c.word).join('", "')}" was heard as "${heard.join(' ').slice(0, 80)}"…`);
+  }
+  if (best.score > SAID_RIGHT) onProgress(`⚠ ${label}: "${checks.map(c => c.word).join('", "')}" still not clear after ${maxTakes} takes — kept the closest`);
+  return best.buf;
+}
+
 /**
  * A demo-video clip plays on past its own end (see showcase.js) — but not
  * into footage another scene shows: stop at the next clip of the same video
@@ -180,22 +210,26 @@ export async function presenterPhase(dir, plan, assets, { endpoint, ckpt, worker
   const portrait = { name: `portrait-${seed}.png`, dataUrl: dataUrl(readFileSync(join(dir, portraitFile)), 'image/png') };
   const voiceRef = { name: `voiceref-${seed}.wav`, dataUrl: dataUrl(readFileSync(join(dir, voiceRefFile)), 'audio/wav') };
   const live = (only ?? plan.scenes.map((s, i) => (s.type === 'presenter' ? i : -1))).filter(i => i >= 0 && plan.scenes[i].type === 'presenter');
+  const lexicon = loadLexicon(plan.pronunciations);
   for (const [k, i] of live.entries()) {
     const scene = plan.scenes[i];
     // Same cache key on every worker: a clip is a clip, wherever it was made.
     const rel = `assets/presenter-${assetKey(assets[i].presenterSpoken, plan.presenter.description, assets[i].clipSeconds, seed, voiceRefFile)}.mp4`;
     onProgress(existsSync(join(dir, rel)) ? `Presenter clip ${k + 1}/${live.length} (unchanged, reused)` : `Presenter clip ${k + 1}/${live.length} (${assets[i].clipSeconds}s) on ${workerName}…`);
     try {
-      assets[i].clipFile = await cached(dir, rel, async () => {
+      // LTX generates the speech itself, so check the brand name here too
+      // (one retry with the next seed — each take is ~2 min).
+      const checks = wordsToCheck(scene.speech, lexicon);
+      assets[i].clipFile = await cached(dir, rel, () => speakChecked(dir, async (take) => {
         const out = await generateTalkingHead(endpoint, {
           portrait, voiceRef, visual: presenterVisual(plan.presenter.description),
-          speech: assets[i].presenterSpoken, sounds: PRESENTER_SOUNDS, seconds: assets[i].clipSeconds, seed, ckpt,
+          speech: assets[i].presenterSpoken, sounds: PRESENTER_SOUNDS, seconds: assets[i].clipSeconds, seed: seed + take - 1, ckpt,
           ...(workerName !== 'local' ? { unreachableMs: WORKER_UNREACHABLE_MS } : {}),
         });
         const buf = await fetchComfyOutput(endpoint, out);
         dropCache('videos', out.filename);
         return buf;
-      });
+      }, checks, `presenter clip ${k + 1}`, onProgress, { maxTakes: 2, ext: 'mp4' }));
       assets[i].clipDur = await probeDuration(join(dir, assets[i].clipFile));
     } catch (err) {
       onProgress(`⚠ presenter clip for scene ${i + 1} failed on ${workerName} (${err.message})`);

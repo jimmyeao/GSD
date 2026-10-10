@@ -33,3 +33,22 @@ describe('pronunciations', () => {
     assert.equal(applyPronunciations('Zorbo', lexiconFor(lex, 'tts')), normalizeRespelling('zor-bo'));
   });
 });
+
+describe('speakChecked', () => {
+  it('re-records until the brand is heard right, keeping the best take', async () => {
+    const { speakChecked } = await import('../src/agents/explainer/assets.js');
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    const dir = mkdtempSync(join(tmpdir(), 'say-'));
+    const heardAs = ['Visit VA Cast today', 'Visit Satya Cast today', 'Visit TheaCast today'];
+    let n = 0;
+    const speakFn = async () => Buffer.from(`take${++n}`);
+    const transcribeFn = async () => heardAs[n - 1].split(' ').map(text => ({ text }));
+    const checks = [{ word: 'TheiaCast', sounds: ['Theea cast', 'Thee-ah-cast'], count: 1 }];
+    const buf = await speakChecked(dir, speakFn, checks, 'scene 1', () => {}, { transcribeFn });
+    assert.equal(buf.toString(), 'take3');
+    assert.equal(n, 3);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
