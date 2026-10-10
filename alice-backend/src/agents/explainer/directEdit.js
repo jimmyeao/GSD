@@ -111,7 +111,8 @@ export async function applyDirectEdit(dir, plan, slots, message, { llm, complete
   const messages = buildEditPrompt(target.file, original, message, plan.font, target.retargeted, refs);
 
   let problems = [];
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  const ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
     // Retry without reasoning: a long thinking pass can eat the whole output budget before the file.
     const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 16_000, temperature: 0.3, noThink: attempt > 1, signal: AbortSignal.timeout(420_000) });
     const html = extractHtml(reply);
@@ -123,11 +124,11 @@ export async function applyDirectEdit(dir, plan, slots, message, { llm, complete
       const { findings } = await check(dir);
       problems = findings
         .filter(f => (compId ? belongsTo(f, sceneIndex, slots) : (f.sourceFile ?? '').endsWith('index.html')))
-        .map(f => `${f.code}: ${f.message}${f.fixHint ? ` (fix: ${f.fixHint})` : ''}`);
+        .map(f => `${f.code}: ${f.message}${f.text ? ` [text: "${f.text}"]` : ''}${f.fixHint ? ` (fix: ${f.fixHint})` : ''}${f.code === 'contrast_aa_failure' ? ' — make that text darker/lighter against what is behind it' : ''}`);
       if (!problems.length) return { ok: true, file: target.file, attempts: attempt, problems: [] };
       writeFileSync(path, original); // never leave a broken edit on disk
     }
     messages.push({ role: 'assistant', content: reply || '(empty)' }, { role: 'user', content: `That edit was rejected:\n${problems.map(p => `- ${p}`).join('\n')}\nReturn the complete corrected file only.` });
   }
-  return { ok: false, file: target.file, attempts: 2, problems };
+  return { ok: false, file: target.file, attempts: ATTEMPTS, problems };
 }

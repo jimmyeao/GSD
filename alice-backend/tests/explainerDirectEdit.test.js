@@ -61,7 +61,7 @@ describe('applyDirectEdit', () => {
       check: async () => ({ findings: [] }),
     });
     assert.equal(res.ok, false);
-    assert.equal(calls, 2);
+    assert.equal(calls, 3);
     assert.match(res.problems.join(), /scene-1/);
     assert.match(readFileSync(join(dir, 'compositions/scene-1.html'), 'utf8'), /Keep me/);
   });
