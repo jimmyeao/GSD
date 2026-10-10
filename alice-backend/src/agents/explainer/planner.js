@@ -141,7 +141,7 @@ export async function revisePlan(llm, plan, feedback, ctx, { completeFn = comple
   ];
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 8000, temperature: 0.4, signal: AbortSignal.timeout(300_000) });
+    const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 8000, temperature: 0.4, noThink: attempt > 0, signal: AbortSignal.timeout(300_000) });
     try {
       const revised = await groundPlan(llm, normalizePlan(extractJson(reply), ctx), messages, reply, ctx, completeFn);
       revised.pronunciations = { ...(plan.pronunciations ?? {}), ...revised.pronunciations };
@@ -315,7 +315,7 @@ export async function groundPlan(llm, plan, messages, reply, opts, completeFn = 
   if (!issues.length) return plan;
   messages.push({ role: 'assistant', content: reply }, { role: 'user', content: `These claims are NOT in the brief, source material or the client's answers — remove them, or replace them with facts that are:\n${describeIssues(issues)}\nReturn the complete corrected JSON.` });
   try {
-    const fixed = normalizePlan(extractJson(await completeFn(llm.endpoint, llm.model, messages, { numPredict: 8000, temperature: 0.3, signal: AbortSignal.timeout(300_000) })), opts);
+    const fixed = normalizePlan(extractJson(await completeFn(llm.endpoint, llm.model, messages, { numPredict: 8000, temperature: 0.3, noThink: true, signal: AbortSignal.timeout(300_000) })), opts);
     plan = fixed;
     issues = findUnsupportedClaims(plan, facts);
   } catch { /* keep the original plan and scrub it */ }
@@ -330,7 +330,9 @@ export async function planExplainer(llm, opts, { completeFn = complete } = {}) {
   const messages = buildPlannerPrompt(opts);
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 8000, temperature: 0.6, signal: AbortSignal.timeout(300_000) });
+    // Retry without reasoning: Qwen3.6 sometimes drafts the whole plan inside
+    // its reasoning and hits the token cap before writing any content.
+    const reply = await completeFn(llm.endpoint, llm.model, messages, { numPredict: 8000, temperature: 0.6, noThink: attempt > 0, signal: AbortSignal.timeout(300_000) });
     try {
       const plan = normalizePlan(extractJson(reply), opts);
       return await groundPlan(llm, plan, messages, reply, opts, completeFn);
