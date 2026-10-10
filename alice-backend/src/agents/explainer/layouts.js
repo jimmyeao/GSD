@@ -16,6 +16,7 @@
  */
 
 import { showcase } from './showcase.js';
+import { resolveFx, applySceneFx } from './effects.js';
 import { resolveStyle, entrance, headCss, marker, bulletCss, cardCss } from './styles.js';
 
 export const LAYOUTS = ['bullets', 'stat', 'steps', 'compare', 'statement', 'showcase', 'title', 'cta'];
@@ -259,7 +260,10 @@ export function buildLayoutHtml(compId, scene, ctx) {
   if (layout === 'showcase' && !ctx.mediaFile) layout = 'bullets';
   if (scene.media && ctx.mediaFile && layout !== 'showcase' && scene.type === 'narrated') layout = 'showcase';
   const style = ctx.style ?? legacyStyle(ctx);
-  return BUILDERS[layout](compId, scene, { ...ctx, style, words: ctx.words ?? [] });
+  // Effects the review picked for this scene (catalogue names → native ids).
+  const fx = ctx.fx ?? resolveFx(scene.effects);
+  const html = BUILDERS[layout](compId, scene, { ...ctx, style, fx, words: ctx.words ?? [] });
+  return applySceneFx(html, compId, layout, fx, style);
 }
 
 /** Pre-style callers (and tests) pass palette/font only → Midnight with that palette/font. */

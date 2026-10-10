@@ -21,6 +21,7 @@
 
 import { revealTimes, shell, esc, escRaw, r2 } from './layouts.js';
 import { entrance, headCss, bulletCss, marker } from './styles.js';
+import { calloutShape } from './effects.js';
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -60,14 +61,18 @@ export function focusTweens(sel, opts) {
 const CURSOR_SVG = '<svg width="34" height="34" viewBox="0 0 24 24"><path d="M4 2 L4 19 L8.6 14.8 L11.6 21.6 L14.6 20.3 L11.7 13.6 L18 13.4 Z" fill="#ffffff" stroke="#111111" stroke-width="1.4" stroke-linejoin="round"/></svg>';
 
 /** Cursor, click ripples and spotlight boxes for the camera keys. */
-function interaction(id, keys, { W, Hv, duration, accent }) {
+function interaction(id, keys, { W, Hv, duration, accent, callout = 'spotlight' }) {
   if (!keys.length) return { css: '', html: '', js: '' };
+  // Callout style from the effects review: spotlight (dim the rest) | circle (hand-drawn) | outline.
+  const drawn = callout === 'circle' || callout === 'outline';
   const css = `
   #${id}-cursor { position: absolute; left: 0; top: 0; width: 34px; height: 34px; transform-origin: 0 0; filter: drop-shadow(0 3px 6px rgba(0,0,0,0.45)); z-index: 5; }
   .${id}-spot { position: absolute; border-radius: 10px; box-shadow: 0 0 0 4000px rgba(8,10,16,0.38); opacity: 0; z-index: 3; }
-  .${id}-ring { position: absolute; width: 60px; height: 60px; margin: -30px 0 0 -30px; border-radius: 50%; border: 4px solid ${accent}; opacity: 0; z-index: 4; }`;
+  .${id}-ring { position: absolute; width: 60px; height: 60px; margin: -30px 0 0 -30px; border-radius: 50%; border: 4px solid ${accent}; opacity: 0; z-index: 4; }
+  .${id}-co { position: absolute; overflow: visible; z-index: 3; }`;
   const html = [
-    ...keys.map((k, n) => `<div id="${id}-spot${n}" class="${id}-spot" style="left:${r2(k.box.x - 6)}px; top:${r2(k.box.y - 6)}px; width:${r2(k.box.w + 12)}px; height:${r2(k.box.h + 12)}px; border:${r2(3 / k.S)}px solid ${accent};"></div>`),
+    ...keys.map((k, n) => (drawn ? calloutShape(callout, id, n, k.box, k.S, accent)
+      : `<div id="${id}-spot${n}" class="${id}-spot" style="left:${r2(k.box.x - 6)}px; top:${r2(k.box.y - 6)}px; width:${r2(k.box.w + 12)}px; height:${r2(k.box.h + 12)}px; border:${r2(3 / k.S)}px solid ${accent};"></div>`)),
     ...keys.map((k, n) => `<div id="${id}-ring${n}" class="${id}-ring" style="left:${r2(k.cx)}px; top:${r2(k.cy)}px;"></div>`),
     `<div id="${id}-cursor">${CURSOR_SVG}</div>`,
   ].join('\n');
@@ -84,8 +89,13 @@ function interaction(id, keys, { W, Hv, duration, accent }) {
     // Each spotlight fades before the next target's (they'd stack otherwise); the last one stays until the pull-back.
     const last = n === keys.length - 1;
     const off = r2(last ? Math.min(Math.max(k.at + 1.6, duration - 1.3), duration - 0.3) : Math.max(click + 0.35, k.next - 0.1));
-    js.push(`  tl.fromTo("#${id}-spot${n}", { opacity: 0 }, { opacity: 1, duration: 0.25, ease: "power1.out", immediateRender: false }, ${r2(click + 0.05)});`);
-    js.push(`  tl.to("#${id}-spot${n}", { opacity: 0, duration: 0.2, ease: "power1.in" }, ${off});`);
+    if (drawn) {
+      js.push(`  tl.fromTo("#${id}-co${n} path", { strokeDashoffset: 1 }, { strokeDashoffset: 0, duration: 0.55, ease: "power2.inOut", immediateRender: false }, ${r2(click + 0.05)});`);
+      js.push(`  tl.to("#${id}-co${n}", { opacity: 0, duration: 0.2, ease: "power1.in" }, ${off});`);
+    } else {
+      js.push(`  tl.fromTo("#${id}-spot${n}", { opacity: 0 }, { opacity: 1, duration: 0.25, ease: "power1.out", immediateRender: false }, ${r2(click + 0.05)});`);
+      js.push(`  tl.to("#${id}-spot${n}", { opacity: 0, duration: 0.2, ease: "power1.in" }, ${off});`);
+    }
   });
   const end = Math.max(keys.at(-1).at + 1.6, duration - 1.3);
   if (end + 0.8 <= duration - 0.1) js.push(`  tl.to("#${id}-cursor", { x: ${r2(W * 0.72)}, y: ${r2(Hv * 0.74)}, scale: 1, duration: 0.8, ease: "power2.inOut" }, ${r2(end)});`);
@@ -104,7 +114,7 @@ export function showcase(id, s, ctx) {
   // A captured full web page is far taller than the window: show a 16:10 viewport and scroll.
   const Hv = H && H > shotW * 0.75 ? Math.round(shotW * 0.625) : H;
   const keys = video ? [] : cameraKeys({ focus: ctx.mediaFocus, size, times, width: shotW, viewportH: Hv, duration: ctx.duration });
-  const act = interaction(id, keys, { W: shotW, Hv: Hv ?? shotW * 0.5625, duration: ctx.duration, accent: st.palette.accent });
+  const act = interaction(id, keys, { W: shotW, Hv: Hv ?? shotW * 0.5625, duration: ctx.duration, accent: st.palette.accent, callout: ctx.fx?.callout });
 
   let camera;
   if (keys.length) camera = focusTweens(`#${id}-stage`, { focus: ctx.mediaFocus, size, times, width: shotW, viewportH: Hv, duration: ctx.duration });

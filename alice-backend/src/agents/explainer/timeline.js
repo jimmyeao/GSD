@@ -17,6 +17,8 @@
 
 import { buildLayoutHtml } from './layouts.js';
 import { resolveStyle } from './styles.js';
+import { resolveFx, transitionTweens as fxTransition, transitionLayer, TRANSITION_CSS, overlayLayer } from './effects.js';
+import { NATIVE } from './catalog.js';
 
 export const W = 1920;
 export const H = 1080;
@@ -206,37 +208,14 @@ function backgroundHtml(i, scene, slot, a, st, clipDuration) {
  * The previous scene's background/graphics stay on screen for `dur` (their
  * clips are extended), so the new scene can be revealed over them.
  */
-function transitionTweens(i, slot, st, scene) {
+function sceneTransition(i, slot, st, scene) {
   if (i === 0) return [];
-  const t = r2(slot.start), { type, dur } = st.transition;
-  const D = r2(dur), prev = i - 1;
+  const t = r2(slot.start), D = r2(st.transition.dur), prev = i - 1;
+  const type = resolveFx(scene.effects).transition ?? st.transition.type;
   const out = [`tl.to("#g-${prev}", { opacity: 0, duration: ${r2(D * 0.6)}, ease: "power1.in" }, ${t});`];
-  const gfxIn = `tl.fromTo("#g-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.out" }, ${t});`;
-  const presIn = scene.type === 'presenter' ? `tl.fromTo("#presenter-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.out" }, ${t});` : '';
-  switch (type) {
-    case 'wipe':
-      out.push(`tl.fromTo("#bgw-${i}", { clipPath: "inset(0% 100% 0% 0%)" }, { clipPath: "inset(0% 0% 0% 0%)", duration: ${D}, ease: "power2.inOut" }, ${t});`);
-      break;
-    case 'push':
-      out.push(`tl.fromTo("#bgw-${i}", { x: ${W} }, { x: 0, duration: ${D}, ease: "power3.inOut" }, ${t});`,
-        `tl.fromTo("#bgw-${prev}", { x: 0 }, { x: ${-W}, duration: ${D}, ease: "power3.inOut" }, ${t});`);
-      break;
-    case 'zoom':
-      out.push(`tl.fromTo("#bgw-${i}", { scale: 1.35, opacity: 0 }, { scale: 1, opacity: 1, duration: ${D}, ease: "expo.out" }, ${t});`,
-        `tl.fromTo("#bgw-${prev}", { scale: 1 }, { scale: 0.85, duration: ${D}, ease: "power2.in" }, ${t});`);
-      break;
-    case 'slideup':
-      out.push(`tl.fromTo("#bgw-${i}", { y: ${H} }, { y: 0, duration: ${D}, ease: "power3.out" }, ${t});`);
-      break;
-    case 'flash':
-      out.push(`tl.fromTo("#flash-${i}", { opacity: 0 }, { opacity: 1, duration: ${r2(D * 0.3)}, ease: "power2.in" }, ${r2(t - D * 0.3)});`,
-        `tl.to("#flash-${i}", { opacity: 0, duration: ${r2(D * 0.7)}, ease: "power2.out" }, ${t});`);
-      break;
-    default: // crossfade
-      out.push(`tl.fromTo("#bgw-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.inOut" }, ${t});`);
-  }
-  out.push(gfxIn);
-  if (presIn) out.push(presIn);
+  out.push(...fxTransition(type, { i, prev, t, D, W, H }));
+  out.push(`tl.fromTo("#g-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.out" }, ${t});`);
+  if (scene.type === 'presenter') out.push(`tl.fromTo("#presenter-${i}", { opacity: 0 }, { opacity: 1, duration: ${D}, ease: "power1.out" }, ${t});`);
   return out;
 }
 
@@ -277,8 +256,9 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
     } else {
       tweens.push(...decorTweens(i, { start: slot.start, duration: held }, st));
     }
-    if (st.transition.type === 'flash' && i > 0) {
-      parts.push(`<div id="flash-${i}" class="clip flash" data-start="${r2(Math.max(0, slot.start - T * 0.3))}" data-duration="${r2(T)}" data-track-index="4"></div>`);
+    if (i > 0) {
+      const layer = transitionLayer(resolveFx(scene.effects).transition ?? st.transition.type, i, slot.start, T);
+      if (layer) parts.push(layer);
     }
     if (scene.type === 'presenter' && a.clipFile) {
       parts.push(`<video id="presenter-${i}" class="clip presenter" src="${esc(a.clipFile)}" playsinline data-has-audio="true" data-volume="1" data-start="${slot.start}" data-duration="${slot.duration}" data-track-index="1"></video>`);
@@ -291,7 +271,7 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
     }
     const area = SAFE_AREAS[scene.type] ?? SAFE_AREAS.narrated;
     parts.push(`<div id="g-${i}" class="gfx" style="left: ${area.x}px; top: ${area.y}px; width: ${area.width}px; height: ${area.height}px;" data-composition-id="scene-${i}" data-composition-src="compositions/scene-${i}.html" data-start="${slot.start}" data-duration="${held}" data-track-index="2" data-width="${area.width}" data-height="${area.height}"></div>`);
-    tweens.push(...transitionTweens(i, slot, st, scene));
+    tweens.push(...sceneTransition(i, slot, st, scene));
 
     const speechOffset = scene.type === 'presenter' ? slot.start : slot.start + VOICE_LEAD;
     if (a.voiceFile) {
@@ -306,6 +286,9 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
   captions.forEach((c, k) => {
     parts.push(`<div id="cap-${k}" class="clip caption" data-start="${c.start}" data-duration="${c.duration}" data-track-index="3"><span>${esc(c.text)}</span></div>`);
   });
+  // Whole-video overlay chosen by the effects review (vignette / grain).
+  const overlay = overlayLayer(NATIVE[plan.effects?.overlay]?.id, total);
+  if (overlay.html) { parts.push(overlay.html); tweens.push(...overlay.tweens); }
   if (musicFile) {
     parts.push(`<audio id="music" src="${esc(musicFile)}" data-start="0" data-duration="${total}" data-volume="0.16" data-track-index="7"></audio>`);
   }
@@ -333,7 +316,8 @@ export function buildIndexHtml(plan, assets, { musicFile, portraitFile } = {}) {
   .gridlines { position: absolute; inset: -120px 0 0 0; background-size: 60px 60px; }
   .blob { position: absolute; width: 900px; height: 900px; border-radius: 50%; filter: blur(120px); }
   .spot { position: absolute; width: 1400px; height: 1400px; border-radius: 50%; }
-  .flash { position: absolute; inset: 0; background: #ffffff; opacity: 0; }
+${TRANSITION_CSS}
+${overlay.css}
   .kb { position: absolute; inset: 0; }
   .kb img { width: 100%; height: 100%; object-fit: cover; display: block; filter: blur(6px) saturate(0.85); transform: scale(1.04); }
   .shade { position: absolute; inset: 0; background: ${shade}; }
