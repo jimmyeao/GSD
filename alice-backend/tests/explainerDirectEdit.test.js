@@ -45,7 +45,7 @@ describe('applyDirectEdit', () => {
 
   it('applies a passing edit', async () => {
     writeFileSync(join(dir, 'compositions/scene-1.html'), scene('Old'));
-    const res = await applyDirectEdit(dir, plan, slots, studioPrompt, {
+    const res = await applyDirectEdit(dir, plan, slots, studioPrompt, { references: async () => [],
       llm: { endpoint: 'e', model: 'm' }, completeFn: async () => scene('New', '#scene-1-h{color:#ffd700;font-size:120px}'), check: async () => ({ findings: [] }),
     });
     assert.ok(res.ok);
@@ -55,7 +55,7 @@ describe('applyDirectEdit', () => {
   it('reverts and retries when checks fail, and never leaves a broken file', async () => {
     writeFileSync(join(dir, 'compositions/scene-1.html'), scene('Keep me'));
     let calls = 0;
-    const res = await applyDirectEdit(dir, plan, slots, studioPrompt, {
+    const res = await applyDirectEdit(dir, plan, slots, studioPrompt, { references: async () => [],
       llm: { endpoint: 'e', model: 'm' },
       completeFn: async () => { calls++; return scene('Broken', '#scene-1 .x{color:red}'); }, // dangling #scene-1 selector
       check: async () => ({ findings: [] }),
@@ -68,7 +68,7 @@ describe('applyDirectEdit', () => {
 
   it('rolls back when hyperframes check flags the edited file', async () => {
     writeFileSync(join(dir, 'compositions/scene-1.html'), scene('Original'));
-    const res = await applyDirectEdit(dir, plan, slots, studioPrompt, {
+    const res = await applyDirectEdit(dir, plan, slots, studioPrompt, { references: async () => [],
       llm: { endpoint: 'e', model: 'm' }, completeFn: async () => scene('Overlapping'),
       check: async () => ({ findings: [{ stage: 'layout', sourceFile: 'compositions/scene-1.html', code: 'content_overlap', message: 'overlap' }] }),
     });

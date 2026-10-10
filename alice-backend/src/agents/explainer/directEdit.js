@@ -10,6 +10,8 @@
  * An open Studio picks the change up live (it watches project files).
  */
 
+import { loadCatalog, curate, menuText } from './catalog.js';
+import { effectNotes } from './sceneWriter.js';
 import { readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { complete } from '../llmClient.js';
@@ -58,7 +60,24 @@ function safePath(dir, file) {
   return p;
 }
 
-function buildEditPrompt(file, html, message, font, retargeted = false) {
+/**
+ * Catalogue items that would help with this edit (e.g. "show the user typing
+ * a prompt" → typed-prompt), picked by the LLM from the curated menu, with
+ * their real source for the edit prompt. [] on any failure.
+ */
+export async function editReferences(llm, instruction, { completeFn = complete } = {}) {
+  try {
+    const menu = curate(await loadCatalog()).filter(m => !['transition', 'overlay'].includes(m.role));
+    const reply = await completeFn(llm.endpoint, llm.model, [
+      { role: 'system', content: `Pick at most 2 HyperFrames catalogue items whose technique would help implement the client's edit, or none. Reply ONLY with a JSON array of exact names, e.g. ["typed-prompt"] or [].\n\n${menuText(menu)}` },
+      { role: 'user', content: instruction },
+    ], { numPredict: 200, temperature: 0, noThink: true, signal: AbortSignal.timeout(90_000) });
+    const names = JSON.parse(/\[[\s\S]*?\]/.exec(String(reply))?.[0] ?? '[]').filter(n => menu.some(m => m.name === n)).slice(0, 2);
+    return (await effectNotes({ items: names })).filter(n => n.source || n.description);
+  } catch { return []; }
+}
+
+function buildEditPrompt(file, html, message, font, retargeted = false, refs = []) {
   const isScene = file.startsWith('compositions/');
   const w = /data-width="(\d+)"/.exec(html)?.[1], h = /data-height="(\d+)"/.exec(html)?.[1];
   const system = `You edit ONE file of a HyperFrames video project (HTML + GSAP, rendered frame-by-frame to video). Apply exactly the change the client asks for to the element they selected, and change nothing else. Output ONLY the complete edited file, no prose, no code fences.
@@ -72,14 +91,15 @@ Rules:
 ${w && h ? `- This composition's canvas is ${w}x${h}px. ALL text must stay fully inside it and must not cover other text: if the request can't fit literally (e.g. "much bigger"), make the closest change that fits — the largest size that still wraps cleanly within ${w}px and leaves room for the other elements.
 ` : ''}${ANTI_SECOND_GUESS}`;
   const note = retargeted ? `\n\n(The client clicked this scene's full-frame background in Studio; the request is about this scene, so apply it to this scene's graphics file below. Ignore the selected-element details.)` : '';
-  const user = `The client's request (copied from HyperFrames Studio, with the selected element's details):\n${message}${note}\n\nCurrent ${file}:\n${html}`;
+  const refText = refs.length ? `\n\nUseful HyperFrames catalogue techniques for this request (adapt them to this file's ids, palette and font — never paste their demo content, scripts or URLs):\n${refs.map(r => `--- ${r.name}: ${r.description} ---${r.source ? `\n${r.source}` : ''}`).join('\n\n')}` : '';
+  const user = `The client's request (copied from HyperFrames Studio, with the selected element's details):\n${message}${note}${refText}\n\nCurrent ${file}:\n${html}`;
   return [{ role: 'system', content: system }, { role: 'user', content: user }];
 }
 
 /**
  * @returns {Promise<{ok: boolean, file: string, attempts: number, problems: string[]}>}
  */
-export async function applyDirectEdit(dir, plan, slots, message, { llm, completeFn = complete, check = checkProject } = {}) {
+export async function applyDirectEdit(dir, plan, slots, message, { llm, completeFn = complete, check = checkProject, references = editReferences } = {}) {
   const target = parseStudioPrompt(message);
   if (!target) throw new Error('no File: line pointing at index.html or compositions/*.html');
   const path = safePath(dir, target.file);
@@ -87,7 +107,8 @@ export async function applyDirectEdit(dir, plan, slots, message, { llm, complete
   const original = readFileSync(path, 'utf8');
   const compId = /compositions\/(scene-\d+)\.html$/.exec(target.file)?.[1];
   const sceneIndex = compId ? Number(compId.split('-')[1]) : -1;
-  const messages = buildEditPrompt(target.file, original, message, plan.font, target.retargeted);
+  const refs = compId ? await references(llm, studioInstruction(message), { completeFn }) : [];
+  const messages = buildEditPrompt(target.file, original, message, plan.font, target.retargeted, refs);
 
   let problems = [];
   for (let attempt = 1; attempt <= 2; attempt++) {
