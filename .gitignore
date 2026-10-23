@@ -7,3 +7,13 @@ dist/
 .DS_Store
 alice-backend/data/assets/
 alice-backend/data/explainers/
+
+# Runtime state and secrets — never commit
+alice-backend/data/*.db
+alice-backend/data/*.db-shm
+alice-backend/data/*.db-wal
+alice-backend/data/*.db.bak-*
+alice-backend/data/*.db-*.bak-*
+*.pem
+*.pem.bak-*
+.remember/tmp/
