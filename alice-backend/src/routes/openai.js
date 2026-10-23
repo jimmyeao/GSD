@@ -37,6 +37,7 @@ import { requireApiKey } from '../auth.js';
 import { config } from '../config.js';
 import { generateImage } from '../agents/comfyClient.js';
 import { ensureComfyRunning, freeComfyMemory } from '../comfyManager.js';
+import { ASSISTANT_MODEL, handleAssistantCompletion } from '../agents/voiceAssistant.js';
 
 const router = Router();
 router.use(requireApiKey);
@@ -52,6 +53,7 @@ router.get('/models', (_req, res) => {
   const now = Math.floor(Date.now() / 1000);
   const data = [
     ...CHAT_MODELS.map(id => ({ id, object: 'model', created: now, owned_by: 'alice' })),
+    { id: ASSISTANT_MODEL, object: 'model', created: now, owned_by: 'alice' },
     ...IMAGE_MODELS.map(id => ({ id: `alice-image-${id}`, object: 'model', created: now, owned_by: 'alice' })),
   ];
   res.json({ object: 'list', data });
@@ -67,6 +69,10 @@ router.post('/chat/completions', async (req, res) => {
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
     return res.status(400).json({ error: { message: 'messages (non-empty array) is required', type: 'invalid_request_error' } });
   }
+
+  // `alice-assistant` runs a real Alice agent (voice clients such as Home
+  // Assistant) instead of proxying to the LLM — see agents/voiceAssistant.js.
+  if (body.model === ASSISTANT_MODEL) return handleAssistantCompletion(req, res);
 
   // general/coder/mail/vision all point at the same LiteLLM gateway — the
   // caller's `model` field selects the alias, not the endpoint.
