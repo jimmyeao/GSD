@@ -88,8 +88,13 @@ let _abort = null;
 
 export function isSpeaking() { return !!_audio && !_audio.paused; }
 
+// Agents write status/progress as quoted lines ("> Looking up list events…") so they show in
+// the chat; those are for reading, never for speaking.
+const _stripStatusLines = (text) => String(text ?? '').replace(/^[ \t]*>[^\n]*\n?/gm, '');
+
 export function speak(text, opts = {}) {
   stopSpeaking();
+  text = _stripStatusLines(text);
   if (!text?.trim()) { opts.onEnd?.(); return; }
 
   const url = opts.backendUrl || _backendUrl;
@@ -141,6 +146,15 @@ class SpeechQueue {
     this._textQueue = [];         // text chunks waiting to be fetched
     this._audioQueue = [];        // pre-fetched blobs ready to play
     this._fetching = 0;           // number of in-flight fetches
+    // Fetches finish in whatever order the TTS server answers (the cloned voice varies a lot),
+    // but speech must play in sentence order: each fetch gets a sequence number and its audio
+    // waits in _ready until every earlier sentence has arrived (or failed).
+    this._seq = 0;                // next sequence number to hand out
+    this._nextSeq = 0;            // next sequence number allowed to play
+    this._ready = new Map();      // seq → blob, or null if that fetch failed
+    this._gen = 0;                // bumped on stop() so late results from a cancelled turn are ignored
+    this._lineStart = true;       // for the status-line filter: are we at the start of a line?
+    this._skipLine = false;       // …and are we inside a "> status" line that must not be spoken?
     this._playing = false;
     this._stopped = false;
     this._currentAudio = null;
@@ -153,6 +167,8 @@ class SpeechQueue {
   /** Feed new text chunk from streaming. Batches into decent-sized paragraphs. */
   push(text) {
     if (this._stopped) return;
+    text = this._filterStatus(text);
+    if (!text) return;
     this._pending += text;
 
     // Reset the flush timer on each push
@@ -185,6 +201,24 @@ class SpeechQueue {
         this._pending = '';
       }
     }, 2000);
+  }
+
+  /**
+   * Drop "> status" lines. Stateful, because LLM tokens can split a line anywhere
+   * ("> " in one token, the words in the next).
+   */
+  _filterStatus(text) {
+    let out = '';
+    for (const ch of text) {
+      if (this._skipLine) {
+        if (ch === '\n') { this._skipLine = false; this._lineStart = true; out += ch; }
+        continue;
+      }
+      if (this._lineStart && ch === '>') { this._skipLine = true; continue; }
+      out += ch;
+      this._lineStart = ch === '\n' || (this._lineStart && (ch === ' ' || ch === '\t'));
+    }
+    return out;
   }
 
   _enqueue(text) {
@@ -228,6 +262,8 @@ class SpeechQueue {
   _prefetch() {
     while (this._textQueue.length > 0 && this._fetching < this._MAX_PREFETCH && !this._stopped) {
       const text = this._textQueue.shift();
+      const seq = this._seq++;
+      const gen = this._gen;
       this._fetching++;
       const abort = new AbortController();
       this._aborts.add(abort);
@@ -242,9 +278,11 @@ class SpeechQueue {
       .then(r => { if (!r.ok) throw new Error(); return r.blob(); })
       .then(blob => {
         this._aborts.delete(abort);
+        if (gen !== this._gen) return; // belongs to a turn that has since been stopped
         this._fetching--;
         if (!this._stopped) {
-          this._audioQueue.push(blob);
+          this._ready.set(seq, blob);
+          this._drainReady();
           this._playNext();
           this._prefetch(); // fill more slots
         }
@@ -252,9 +290,24 @@ class SpeechQueue {
       })
       .catch(() => {
         this._aborts.delete(abort);
+        if (gen !== this._gen) return;
         this._fetching--;
+        this._ready.set(seq, null); // don't let one failed sentence block the ones after it
+        this._drainReady();
+        this._playNext();
+        this._prefetch();
         _emitSpeaking();
       });
+    }
+  }
+
+  /** Move audio to the play queue strictly in sentence order, stopping at the first gap. */
+  _drainReady() {
+    while (this._ready.has(this._nextSeq)) {
+      const blob = this._ready.get(this._nextSeq);
+      this._ready.delete(this._nextSeq);
+      this._nextSeq++;
+      if (blob) this._audioQueue.push(blob);
     }
   }
 
@@ -313,6 +366,12 @@ class SpeechQueue {
     this._pending = '';
     this._playing = false;
     this._fetching = 0;
+    this._gen++;
+    this._seq = 0;
+    this._nextSeq = 0;
+    this._ready.clear();
+    this._lineStart = true;
+    this._skipLine = false;
     clearTimeout(this._timer);
     this._aborts.forEach(a => a.abort());
     this._aborts.clear();
