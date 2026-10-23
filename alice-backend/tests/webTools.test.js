@@ -138,6 +138,16 @@ describe('tools with a mocked network', () => {
     assert.match(calls[0], /name=London/);
     assert.match(calls[1], /wind_speed_unit=mph/);
   });
+  it('getWeather uses a county hint to pick the right place', async () => {
+    globalThis.fetch = async (url) => String(url).includes('geocoding')
+      ? json({ results: [
+        { name: 'Branston', admin1: 'England', admin2: 'Derbyshire', country: 'United Kingdom', country_code: 'GB', latitude: 52.78, longitude: -1.67 },
+        { name: 'Branston', admin1: 'England', admin2: 'Lincolnshire', country: 'United Kingdom', country_code: 'GB', latitude: 53.195, longitude: -0.475 },
+      ] })
+      : json({ current: { weather_code: 0 }, daily: { time: [] } });
+    const w = await getWeather({ location: 'Branston, Lincolnshire' });
+    assert.equal(w.place, 'Branston, Lincolnshire, England, United Kingdom');
+  });
   it('getWeather reports an unknown place', async () => {
     globalThis.fetch = async () => json({});
     await assert.rejects(getWeather({ location: 'Nowhereville' }), /Couldn't find/);

@@ -18,13 +18,14 @@ import { WEB_TOOLS, runWebTool } from './web/tools.js';
 const MAX_ITERATIONS = 5;
 const MAX_TOOL_RESULT_CHARS = 14_000;
 
-export function buildSystemPrompt(now = new Date()) {
+export function buildSystemPrompt(now = new Date(), defaultLocation = process.env.WEB_DEFAULT_LOCATION) {
   const stamp = now.toLocaleString('en-GB', { timeZone: 'Europe/London', dateStyle: 'full', timeStyle: 'short' });
   return `You are WebAgent, Alice's assistant for live information from the internet.
 It is ${stamp} (UK time). Use UK English, Celsius and mph.
 
 Tools: get_weather, get_news, web_search, read_url. Pick what the question needs:
 - Weather → get_weather. News headlines → get_news. Anything else current or factual → web_search, then read_url on the best one or two results if the snippets are not enough.
+- Weather with no place named: ${defaultLocation ? `use the user's default location, "${defaultLocation}"` : "use the user's location if it appears in the memory facts, otherwise ask which town in one short question and make no tool call"}.
 - Prefer a few well-chosen calls over many. Never answer a current-events or weather question from memory.
 - If a tool returns an error, say so plainly and, if sensible, try one alternative. Never invent results.
 
@@ -90,10 +91,22 @@ export async function runWebAgent({ socket, user, content, history = [], convId 
     for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
       socket.emit('thinking', {});
       let resp;
-      try {
-        resp = await completeWithTools(modelCfg.endpoint, modelCfg.model, messages, {
+      const ask = (extra = {}) => completeWithTools(modelCfg.endpoint, modelCfg.model, messages, {
           signal: abort.signal, tools: WEB_TOOLS, temperature: 0.3, numPredict: 3072,
+          // Picking a tool and phrasing a short answer gain nothing from reasoning; with it on,
+          // an under-specified question burned the whole budget thinking and returned nothing.
+          noThink: true,
+          ...extra,
         });
+      try {
+        resp = await ask();
+        // This agent exists to look things up. A first reply with no tool call that isn't a
+        // clarifying question is the model answering from memory — it invented the weather
+        // in ~1 of 3 runs — so make it use a tool.
+        if (iter === 0 && !resp.tool_calls?.length && !/\?\s*$/.test((resp.content || '').trim())) {
+          console.log('[WebAgent] no tool call on first reply — retrying with a tool required');
+          resp = await ask({ toolChoice: 'required' });
+        }
       } catch (err) {
         if (err instanceof LLMUnavailableError) {
           answer = 'The language model backend is not reachable right now. Please try again shortly.';
@@ -103,11 +116,13 @@ export async function runWebAgent({ socket, user, content, history = [], convId 
       }
 
       const toolCalls = resp.tool_calls;
-      console.log(`[WebAgent] iter=${iter} tool_calls=${toolCalls?.length ?? 0}`
+      console.log(`[WebAgent] iter=${iter} finish=${resp.finish_reason ?? "?"} tool_calls=${toolCalls?.length ?? 0}`
         + (toolCalls?.length ? ` names=${toolCalls.map(t => t.function?.name).join(',')}` : ''));
 
       if (!toolCalls?.length) {
-        answer = resp.content || '';
+        answer = resp.content || (resp.finish_reason === 'length'
+          ? "I ran out of room thinking that through — could you ask it again, a bit more specifically?"
+          : "I didn't get an answer back from the language model — please try again.");
         break;
       }
 

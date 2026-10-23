@@ -105,7 +105,7 @@ export async function getWeather({ location }) {
   const [name, ...rest] = q.split(',').map(s => s.trim());
   const geo = await getJson(`https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(name)}&count=5&language=en&format=json`);
   const hint = rest.join(' ').toLowerCase();
-  const hit = (geo.results ?? []).find(r => hint && `${r.country} ${r.country_code} ${r.admin1 ?? ''}`.toLowerCase().includes(hint)) ?? geo.results?.[0];
+  const hit = (geo.results ?? []).find(r => hint && [r.country, r.country_code, r.admin1, r.admin2, r.admin3].filter(Boolean).join(' ').toLowerCase().includes(hint)) ?? geo.results?.[0];
   if (!hit) throw new Error(`Couldn't find a place called "${q}"`);
 
   const f = await getJson('https://api.open-meteo.com/v1/forecast?' + new URLSearchParams({
@@ -116,7 +116,7 @@ export async function getWeather({ location }) {
   const c = f.current ?? {};
   const d = f.daily ?? {};
   return {
-    place: [hit.name, hit.admin1, hit.country].filter(Boolean).join(', '),
+    place: [hit.name, hit.admin2, hit.admin1, hit.country].filter(Boolean).join(', '),
     local_time: c.time,
     now: {
       conditions: describeWeatherCode(c.weather_code),
