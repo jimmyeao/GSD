@@ -180,7 +180,8 @@ export async function handleAssistantCompletion(req, res, deps = {}) {
 
   try {
     const { text, agent } = await runVoiceTurn({ ...parsed, signal: abort.signal }, deps);
-    console.log(`[voice] ${agent ?? 'unsupported'}: "${parsed.content.slice(0, 60)}" → ${text.length} chars`);
+    // Log the routing outcome only — what someone says aloud at home is not journal material.
+    console.log(`[voice] ${agent ?? 'unsupported'}: ${parsed.content.length} chars in → ${text.length} chars out`);
     const reply = text || "Sorry, I didn't get an answer back. Please try again.";
     if (req.body.stream) return sendSse(res, reply, ASSISTANT_MODEL);
     return res.json(completionBody(reply));
