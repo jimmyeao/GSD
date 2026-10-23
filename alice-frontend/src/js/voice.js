@@ -20,6 +20,27 @@ window.speechSynthesis?.cancel();
 const _allAudio = new Set();
 window.addEventListener('beforeunload', () => _allAudio.forEach(a => { try { a.pause(); } catch {} }));
 
+// ── Speaking state ────────────────────────────────────────────────
+// Lets the UI show a Stop control for as long as Alice is audibly (or about
+// to be) talking — including after the LLM stream has finished.
+const _speakListeners = new Set();
+let _lastActive = false;
+
+/** True while a single utterance or the streaming queue has audio pending/playing. */
+export function isSpeechActive() {
+  return !!_abort || isSpeaking() || !!(_queue && (_queue.active || _queue._fetching > 0));
+}
+
+/** Subscribe to speaking on/off transitions. cb(active: boolean) */
+export function onSpeakingChange(cb) { _speakListeners.add(cb); }
+
+function _emitSpeaking() {
+  const a = isSpeechActive();
+  if (a === _lastActive) return;
+  _lastActive = a;
+  _speakListeners.forEach(cb => { try { cb(a); } catch {} });
+}
+
 export function isSupported() {
   return { recognition: !!SpeechRecognition, synthesis: true };
 }
@@ -75,6 +96,7 @@ export function speak(text, opts = {}) {
   if (!url) { _browserSpeak(text, opts); return; }
 
   _abort = new AbortController();
+  _emitSpeaking();
   fetch(`${url}/tts`, {
     method: 'POST',
     headers: _ttsHeaders(),
@@ -85,7 +107,8 @@ export function speak(text, opts = {}) {
   .then(r => { if (!r.ok) throw new Error(); return r.blob(); })
   .then(blob => {
     if (!_abort) return;
-    _audio = _playBlob(blob, () => { _audio = null; _abort = null; opts.onEnd?.(); });
+    _audio = _playBlob(blob, () => { _audio = null; _abort = null; opts.onEnd?.(); _emitSpeaking(); });
+    _emitSpeaking();
   })
   .catch(() => { if (_abort) _browserSpeak(text, opts); });
 }
@@ -98,6 +121,7 @@ export function stopSpeaking() {
   window.speechSynthesis?.cancel();
   // Also stop the speech queue
   if (_queue) _queue.stop();
+  _emitSpeaking();
 }
 
 // ── Streaming Speech Queue ────────────────────────────────────────
@@ -182,6 +206,7 @@ class SpeechQueue {
       this._textQueue.push(clean);
       this._prefetch();
       this._playNext();
+      _emitSpeaking();
     }
   }
 
@@ -223,10 +248,12 @@ class SpeechQueue {
           this._playNext();
           this._prefetch(); // fill more slots
         }
+        _emitSpeaking();
       })
       .catch(() => {
         this._aborts.delete(abort);
         this._fetching--;
+        _emitSpeaking();
       });
     }
   }
@@ -260,6 +287,7 @@ class SpeechQueue {
       } else {
         this._playNext();
       }
+      _emitSpeaking();
     };
     audio.onerror = audio.onended;
     audio.play().catch(() => { this._playing = false; });
@@ -290,6 +318,7 @@ class SpeechQueue {
     this._aborts.clear();
     if (this._currentAudio) { _allAudio.delete(this._currentAudio); this._currentAudio.pause(); this._currentAudio.src = ''; this._currentAudio = null; }
     if (this._nextAudio) { _allAudio.delete(this._nextAudio); URL.revokeObjectURL(this._nextAudio._blobUrl); this._nextAudio = null; }
+    _emitSpeaking();
   }
 }
 

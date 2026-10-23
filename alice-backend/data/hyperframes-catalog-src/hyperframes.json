@@ -1,0 +1,24 @@
+{
+  "paths": {
+    "blocks": "compositions",
+    "components": "compositions/components",
+    "assets": "assets"
+  },
+  "registryItems": [
+    {
+      "name": "tracing-beam",
+      "type": "hyperframes:component",
+      "target": "compositions/components/tracing-beam.html"
+    },
+    {
+      "name": "tracking-in",
+      "type": "hyperframes:component",
+      "target": "compositions/components/tracking-in.html"
+    },
+    {
+      "name": "typed-prompt",
+      "type": "hyperframes:component",
+      "target": "compositions/components/typed-prompt.html"
+    }
+  ]
+}

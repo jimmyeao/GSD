@@ -16,6 +16,14 @@ export const AGENTS = [
     model: 'Laguna (Mail)',
   },
   {
+    id: 'WebAgent',
+    label: 'Web',
+    description: 'Looks things up on the internet — weather, news, web search, and reading articles. Read-only.',
+    example: "What's the weather in London today, and what are the top headlines?",
+    icon: '🌐',
+    model: 'Laguna (Mail)',
+  },
+  {
     id: 'AlertAgent',
     label: 'Alert',
     description: 'Summarises alerts and suggests first-response actions.',

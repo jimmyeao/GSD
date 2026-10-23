@@ -8,6 +8,14 @@ export const AGENT_REGISTRY = {
     systemPrompt: null, // handled specially — never called directly as LLM
   },
 
+  // Dispatched specially in server.js → runWebAgent() (tool-calling loop); the
+  // prompt below is only used for the router's agent catalogue.
+  WebAgent: {
+    model: 'mail',
+    systemPrompt: `You are WebAgent, Alice's assistant for live information from the internet:
+weather, news, web search and reading articles.`,
+  },
+
   AlertAgent: {
     model: 'general',
     systemPrompt: `You are AlertAgent, a specialist in IT monitoring and incident triage.

@@ -11,7 +11,7 @@ import { initAdmin } from './admin.js';
 import { initMail } from './mail.js';
 import { fetchConversations, fetchMessages, deleteConversation } from './conversations.js';
 import { fetchAssets, deleteAsset } from './assets.js';
-import { isSupported as voiceSupported, createRecognition, speak, stopSpeaking, isSpeaking, setTTSBackend, getSpeechQueue } from './voice.js';
+import { isSupported as voiceSupported, createRecognition, speak, stopSpeaking, isSpeaking, setTTSBackend, getSpeechQueue, isSpeechActive, onSpeakingChange } from './voice.js';
 
 // ------------------------------------------------------------------ State
 let selectedAgent = AGENTS[0]; // RouterAgent default
@@ -944,10 +944,9 @@ if (attachedFilesEl) attachedFilesEl.addEventListener('click', e => {
 
 // ------------------------------------------------------------------ Send
 function handleSend() {
-  // If streaming, clicking Send acts as Stop
-  if (isStreaming) {
-    if (client) client.stopStream();
-    stopSpeaking(); // also stops the speech queue
+  // While streaming or speaking, clicking Send acts as Stop
+  if (isStreaming || isSpeechActive()) {
+    stopAll();
     return;
   }
   // Reset speech queue for new conversation turn
@@ -1041,11 +1040,33 @@ function setStatus(state, label) {
 
 function setStreaming(active) {
   isStreaming = active;
-  sendBtn.disabled = false; // always clickable — acts as Stop when streaming
-  sendBtn.textContent = active ? 'Stop' : 'Send';
-  sendBtn.classList.toggle('stop-mode', active);
   optimiseBtn.disabled = active;
+  refreshStopMode();
 }
+
+// Send doubles as Stop while the response is streaming OR being spoken.
+function refreshStopMode() {
+  const stoppable = isStreaming || isSpeechActive();
+  sendBtn.disabled = false; // always clickable
+  sendBtn.textContent = stoppable ? 'Stop' : 'Send';
+  sendBtn.classList.toggle('stop-mode', stoppable);
+}
+
+/** Interrupt everything: LLM stream and speech. */
+function stopAll() {
+  if (isStreaming && client) client.stopStream();
+  stopSpeaking(); // also stops the speech queue
+}
+
+onSpeakingChange(refreshStopMode);
+
+// Esc interrupts Alice from anywhere (not while a modal text field is composing).
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && (isStreaming || isSpeechActive())) {
+    e.preventDefault();
+    stopAll();
+  }
+});
 
 function setOptimising(active) {
   optimiseBtn.disabled = active;

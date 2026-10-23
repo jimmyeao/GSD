@@ -126,6 +126,24 @@ describe('routeByKeyword', () => {
     assert.equal(routeByKeyword('Scan these nginx error logs for the last hour and summarise'), 'LogWatchAgent');
   });
 
+  // Web
+  it('routes live-information prompts to WebAgent', () => {
+    for (const p of [
+      "What's the weather in London today?",
+      'Will it rain tomorrow in Leeds?',
+      'Give me the latest news',
+      'Top headlines please',
+      'Search the web for Intune passkey support',
+      'Summarise https://www.bbc.co.uk/news/articles/abc123',
+      'Read this article https://example.com/post',
+    ]) assert.equal(routeByKeyword(p), 'WebAgent', p);
+  });
+  it('does not steal mail, code or log prompts', () => {
+    assert.equal(routeByKeyword('Any unread emails about the weather station order?'), 'MailAgent');
+    assert.equal(routeByKeyword('Write a Python script that calls a weather API'), 'CoderAgent');
+    assert.equal(routeByKeyword('Scan these nginx error logs for the last hour and summarise'), 'LogWatchAgent');
+  });
+
   // Default fallback
   it('falls back to AssistantAgent for unrecognised prompts', () => {
     assert.equal(routeByKeyword('What time is it in Tokyo?'), 'AssistantAgent');

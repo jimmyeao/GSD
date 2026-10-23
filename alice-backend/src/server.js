@@ -19,6 +19,7 @@ import { buildPptx, parseSlideResponse } from './agents/slideBuilder.js';
 import { resolveVisuals } from './orchestrator.js';
 import { stmts, expireStaleApprovals } from './db.js';
 import { getMemoryContext, extractFactsAsync } from './memory.js';
+import { runWebAgent } from './agents/webAgent.js';
 import { runMailAgent, executeApprovedAction, summariseExecution, isCompoundRequest } from './agents/mailAgent.js';
 import { socketAuth, csrfProtect, userFromRequest } from './auth.js';
 import { handleUpgrade as handlePreviewUpgrade } from './routes/preview.js';
@@ -176,6 +177,7 @@ app.get('/comfy-video', async (req, res) => {
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
+import { warmTts } from './services/ttsService.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SLIDES_DIR = join(__dirname, '..', 'data', 'slides');
@@ -209,6 +211,7 @@ io.use(socketAuth);
 // ── Socket.IO connection handler ────────────────────────────────────
 io.on('connection', (socket) => {
   console.log(`[ws] connected: ${socket.id} (user: ${socket.user.username})`);
+  warmTts(); // preload the cloned voice so the first spoken reply isn't a cold start
 
   socket.on('message', async ({ agent: requestedAgent, content, history = [], conversationId, imageData, lastFrameData, videoMode, videoModel, imageModel, imageAspect, upscale4k, references, lyrics, musicSeconds, sfxSeconds, explainerOptions, explainerImages, chainImagesData }) => {
     if (!content?.trim()) return;
@@ -300,6 +303,12 @@ io.on('connection', (socket) => {
     // ── MailAgent → tool-calling + approval flow ───────────────────
     if (agentId === 'MailAgent') {
       await runMailAgent({ socket, user: socket.user, content, history, convId });
+      return;
+    }
+
+    // ── WebAgent → read-only internet tools (weather, news, search, read) ──
+    if (agentId === 'WebAgent') {
+      await runWebAgent({ socket, user: socket.user, content, history, convId });
       return;
     }
 

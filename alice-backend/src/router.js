@@ -37,6 +37,27 @@ const ROUTING_RULES = [
       /\bunread\s+(emails?|messages?)\b/i,
     ],
   },
+  // Live internet lookups — weather, news, web search, reading a page.
+  // Kept to unambiguous phrasing; anything vaguer falls through to LLM routing.
+  {
+    agent: 'WebAgent',
+    // Programming about weather/news/URLs is a coding task, not a lookup.
+    unless: /\b(script|code|function|program|api|app|class|module|endpoint|library|bot|regex|sdk)\b/i,
+    patterns: [
+      /\bweather\b/i,
+      /\b(rain|snow|raining|snowing)\b.{0,20}\b(today|tonight|tomorrow|this (week|weekend))\b/i,
+      /\bwill it (rain|snow)\b/i,
+      /\bforecast\b.{0,25}\b(today|tomorrow|tonight|week|weekend|for [A-Z])/i,
+      /\b(latest|breaking|today'?s|top|current)\s+(news|headlines)\b/i,
+      /\bheadlines?\b/i,
+      /\bnews\b.{0,25}\b(today|about|on|from)\b/i,
+      /\bwhat'?s\s+(in\s+the\s+news|happening\s+(in|with))\b/i,
+      /\bsearch\s+(the\s+)?(web|internet|online)\b/i,
+      /\b(google|look\s+up|find)\b.{0,40}\b(online|on the (web|internet))\b/i,
+      /\b(read|summari[sz]e|open|fetch)\b.{0,40}https?:\/\/\S+/i,
+      /\bhttps?:\/\/\S+.{0,30}\b(summari[sz]e|summary|tl;?dr)\b/i,
+    ],
+  },
   // Diagrams — checked before image so "draw a mermaid/flowchart" routes correctly
   {
     agent: 'DiagramAgent',
@@ -302,6 +323,7 @@ const ROUTING_RULES = [
  */
 export function routeByKeyword(prompt) {
   for (const rule of ROUTING_RULES) {
+    if (rule.unless?.test(prompt)) continue;
     for (const pattern of rule.patterns) {
       if (pattern.test(prompt)) return rule.agent;
     }
