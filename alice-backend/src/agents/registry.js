@@ -16,6 +16,14 @@ export const AGENT_REGISTRY = {
 weather, news, web search and reading articles.`,
   },
 
+  // Dispatched specially in server.js → runHomeAssistantAgent() (forwards to
+  // Home Assistant's Assist); the prompt is only used for the router's catalogue.
+  HomeAssistantAgent: {
+    model: 'mail',
+    systemPrompt: `You are HomeAssistantAgent, Alice's smart-home controller:
+turns lights, heating, blinds and other exposed Home Assistant devices on and off.`,
+  },
+
   AlertAgent: {
     model: 'general',
     systemPrompt: `You are AlertAgent, a specialist in IT monitoring and incident triage.

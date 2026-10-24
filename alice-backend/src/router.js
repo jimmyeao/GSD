@@ -58,6 +58,21 @@ const ROUTING_RULES = [
       /\bhttps?:\/\/\S+.{0,30}\b(summari[sz]e|summary|tl;?dr)\b/i,
     ],
   },
+  // Smart-home commands → Home Assistant's Assist. Home nouns only, so IT
+  // phrasing ("turn off the firewall", "switch on logging") is not captured.
+  {
+    agent: 'HomeAssistantAgent',
+    unless: /\b(script|code|function|program|api|app|class|module|endpoint|library|bot|regex|sdk|yaml|automation)\b/i,
+    patterns: [
+      /\b(turn|switch)\s+(on|off)\b.{0,30}\b(lights?|lamps?|heating|thermostat|radiators?|blinds?|curtains?|garage|plugs?|telly)\b/i,
+      /\b(turn|switch)\s+(the\s+)?(\w+\s+){0,2}(lights?|lamps?|heating|thermostat|radiators?|plugs?|telly)\s+(on|off)\b/i,
+      /\b(dim|brighten)\b.{0,25}\b(lights?|lamps?)\b/i,
+      /\b(set|turn)\b.{0,15}\b(heating|thermostat)\b.{0,25}\b(\d+|degrees|up|down|on|off)\b/i,
+      /\b(open|close|raise|lower)\b.{0,15}\b(blinds?|curtains?|garage)\b/i,
+      /\b(lock|unlock)\s+the\s+(\w+\s+)?door\b/i,
+      /\b(?:which|what)\s+(lights?|lamps?)\s+are\s+(on|off)\b/i,
+    ],
+  },
   // Diagrams — checked before image so "draw a mermaid/flowchart" routes correctly
   {
     agent: 'DiagramAgent',

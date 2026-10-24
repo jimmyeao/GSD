@@ -24,6 +24,14 @@ export const AGENTS = [
     model: 'Laguna (Mail)',
   },
   {
+    id: 'HomeAssistantAgent',
+    label: 'Home',
+    description: 'Controls your smart home through Home Assistant — lights, heating, blinds. Only devices exposed to Assist; locks and alarms ask for confirmation.',
+    example: 'Turn off the kitchen light',
+    icon: '🏠',
+    model: 'Home Assistant',
+  },
+  {
     id: 'AlertAgent',
     label: 'Alert',
     description: 'Summarises alerts and suggests first-response actions.',

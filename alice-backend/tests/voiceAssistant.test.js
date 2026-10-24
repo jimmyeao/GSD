@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   plainSpeech, parseChatRequest, pickVoiceAgent, runVoiceTurn, HeadlessSocket,
-  handleAssistantCompletion, completionBody, UNSUPPORTED_REPLY,
+  handleAssistantCompletion, completionBody, UNSUPPORTED_REPLY, parseToolRequest, runToolTurn, toolCallBody,
 } from '../src/agents/voiceAssistant.js';
 
 const anon = { id: 0 };
@@ -163,5 +163,149 @@ describe('handleAssistantCompletion', () => {
     const b = completionBody('hi');
     assert.equal(b.choices[0].finish_reason, 'stop');
     assert.equal(b.model, 'alice-assistant');
+  });
+});
+
+const HA_TOOLS = [
+  { type: 'function', function: { name: 'HassTurnOff', description: 'Turn off', parameters: { type: 'object', properties: { name: { type: 'string' } } } } },
+  { type: 'function', function: { name: 'HassTurnOn', description: 'Turn on', parameters: { type: 'object', properties: { name: { type: 'string' } } } } },
+];
+const call = (id, name, args) => ({ id, type: 'function', function: { name, arguments: args } });
+
+describe('parseToolRequest', () => {
+  it('keeps system/user/assistant/tool messages and normalises tool-call arguments to strings', () => {
+    const r = parseToolRequest({ tools: HA_TOOLS, messages: [
+      { role: 'system', content: 'Devices: kitchen light' },
+      { role: 'user', content: 'turn off the kitchen light' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'c1', type: 'function', function: { name: 'HassTurnOff', arguments: { name: 'kitchen light' } } }] },
+      { role: 'tool', tool_call_id: 'c1', content: '{"success":true}' },
+    ] });
+    assert.equal(r.error, undefined);
+    assert.equal(r.messages.length, 4);
+    assert.equal(r.messages[2].tool_calls[0].function.arguments, '{"name":"kitchen light"}');
+    assert.equal(r.messages[3].tool_call_id, 'c1');
+  });
+  it('rejects bodies without function tools or ending on an assistant message', () => {
+    assert.ok(parseToolRequest({ tools: [], messages: [{ role: 'user', content: 'x' }] }).error);
+    assert.ok(parseToolRequest({ tools: HA_TOOLS, messages: [{ role: 'user', content: 'x' }, { role: 'assistant', content: 'y' }] }).error);
+  });
+  it('drops tool messages with no tool_call_id', () => {
+    const r = parseToolRequest({ tools: HA_TOOLS, messages: [{ role: 'user', content: 'x' }, { role: 'tool', content: 'orphan' }] });
+    assert.equal(r.messages.length, 1);
+  });
+});
+
+describe('runToolTurn', () => {
+  const base = (messages) => ({ messages, tools: HA_TOOLS });
+  it('returns Home Assistant tool calls to HA with string arguments', async () => {
+    const ask = async () => ({ content: null, tool_calls: [call('c1', 'HassTurnOff', { name: 'kitchen light' })] });
+    const r = await runToolTurn(base([{ role: 'user', content: 'turn off the kitchen light' }]), { completeWithTools: ask });
+    assert.equal(r.toolCalls[0].function.name, 'HassTurnOff');
+    assert.equal(r.toolCalls[0].function.arguments, '{"name":"kitchen light"}');
+  });
+  it('speaks the model answer after HA returns tool results', async () => {
+    let seen;
+    const ask = async (_e, _m, msgs) => { seen = msgs; return { content: '**Done**, the kitchen light is off.', tool_calls: null }; };
+    const r = await runToolTurn(base([
+      { role: 'user', content: 'turn off the kitchen light' },
+      { role: 'assistant', content: '', tool_calls: [call('c1', 'HassTurnOff', '{"name":"kitchen light"}')] },
+      { role: 'tool', tool_call_id: 'c1', content: '{"success":true}' },
+    ]), { completeWithTools: ask });
+    assert.deepEqual(r, { text: 'Done, the kitchen light is off.' });
+    assert.equal(seen[0].role, 'system');
+    assert.match(seen[0].content, /ONLY claim a device was changed/);
+  });
+  it('sends exactly one system message, first, merging Home Assistant\'s into ours', async () => {
+    let seen;
+    const ask = async (_e, _m, msgs) => { seen = msgs; return { content: 'ok', tool_calls: null }; };
+    await runToolTurn(base([
+      { role: 'system', content: 'Devices: Kitchen light' },
+      { role: 'user', content: 'hi' },
+    ]), { completeWithTools: ask });
+    assert.equal(seen.filter(m => m.role === 'system').length, 1);
+    assert.equal(seen[0].role, 'system');
+    assert.match(seen[0].content, /Devices: Kitchen light/);
+    assert.match(seen[0].content, /voice assistant/);
+  });
+  it('runs web tools server-side and loops until the model answers', async () => {
+    const answers = [
+      { content: null, tool_calls: [call('w1', 'get_weather', { location: 'Branston' })] },
+      { content: 'It is raining in Branston.', tool_calls: null },
+    ];
+    let n = 0, sawToolResult = false;
+    const ask = async (_e, _m, msgs, opts) => {
+      assert.ok(opts.tools.some(t => t.function.name === 'get_weather'), 'web tools are offered alongside HA tools');
+      assert.ok(opts.tools.some(t => t.function.name === 'HassTurnOn'));
+      if (n === 1) sawToolResult = msgs.some(m => m.role === 'tool' && m.tool_call_id === 'w1');
+      return answers[n++];
+    };
+    const runWebTool = async (name) => ({ name, ok: true });
+    const r = await runToolTurn(base([{ role: 'user', content: 'weather?' }]), { completeWithTools: ask, runWebTool });
+    assert.equal(r.text, 'It is raining in Branston.');
+    assert.equal(sawToolResult, true);
+  });
+  it('returns only the Home Assistant calls from a mixed batch', async () => {
+    const ask = async () => ({ content: null, tool_calls: [call('w1', 'get_weather', {}), call('c1', 'HassTurnOn', { name: 'lamp' })] });
+    const r = await runToolTurn(base([{ role: 'user', content: 'x' }]), { completeWithTools: ask });
+    assert.deepEqual(r.toolCalls.map(c => c.function.name), ['HassTurnOn']);
+  });
+  it('forces a tool call when the model promises an action without making one', async () => {
+    const seenChoices = [];
+    const ask = async (_e, _m, _msgs, opts) => {
+      seenChoices.push(opts.toolChoice);
+      return seenChoices.length === 1 ? { content: "I'll turn off the kitchen light now.", tool_calls: null }
+        : { content: null, tool_calls: [call('c1', 'HassTurnOff', { name: 'kitchen light' })] };
+    };
+    const r = await runToolTurn(base([{ role: 'user', content: 'turn off the kitchen light' }]), { completeWithTools: ask });
+    assert.deepEqual(seenChoices, [undefined, 'required']);
+    assert.equal(r.toolCalls[0].function.name, 'HassTurnOff');
+  });
+  it('admits failure instead of faking success when the forced retry still makes no call', async () => {
+    const ask = async () => ({ content: "I've turned it off.", tool_calls: null });
+    const r = await runToolTurn(base([{ role: 'user', content: 'turn it off' }]), { completeWithTools: ask });
+    assert.deepEqual(r, { text: "Sorry, I wasn't able to do that." });
+  });
+  it('does not retry plain answers or follow-up turns after a tool result', async () => {
+    let n = 0;
+    const ask = async () => { n++; return { content: "I've turned off the lamp.", tool_calls: null }; };
+    const r = await runToolTurn(base([
+      { role: 'user', content: 'lamp off' },
+      { role: 'assistant', content: '', tool_calls: [call('c1', 'HassTurnOff', '{}')] },
+      { role: 'tool', tool_call_id: 'c1', content: '{"success":true}' },
+    ]), { completeWithTools: ask });
+    assert.equal(n, 1);
+    assert.equal(r.text, "I've turned off the lamp.");
+  });
+  it('ignores tool calls to unknown tools', async () => {
+    const ask = async () => ({ content: 'No such thing.', tool_calls: [call('x', 'DeleteEverything', {})] });
+    const r = await runToolTurn(base([{ role: 'user', content: 'x' }]), { completeWithTools: ask });
+    assert.deepEqual(r, { text: 'No such thing.' });
+  });
+  it('gives up politely after too many web rounds', async () => {
+    const ask = async () => ({ content: null, tool_calls: [call('w', 'web_search', { query: 'x' })] });
+    const r = await runToolTurn(base([{ role: 'user', content: 'x' }]), { completeWithTools: ask, runWebTool: async () => ({}) });
+    assert.match(r.text, /couldn't finish/);
+  });
+});
+
+describe('handleAssistantCompletion with tools', () => {
+  const body = { model: 'alice-assistant', tools: HA_TOOLS, messages: [{ role: 'user', content: 'turn off the lamp' }] };
+  const ask = async () => ({ content: null, tool_calls: [call('c1', 'HassTurnOff', { name: 'lamp' })] });
+  it('answers with finish_reason tool_calls', async () => {
+    const res = fakeRes();
+    await handleAssistantCompletion({ body }, res, { completeWithTools: ask });
+    assert.equal(res.body.choices[0].finish_reason, 'tool_calls');
+    assert.equal(res.body.choices[0].message.tool_calls[0].function.arguments, '{"name":"lamp"}');
+  });
+  it('streams tool calls as SSE deltas', async () => {
+    const res = fakeRes();
+    await handleAssistantCompletion({ body: { ...body, stream: true } }, res, { completeWithTools: ask });
+    const joined = res.chunks.join('');
+    assert.match(joined, /"tool_calls":\[\{"index":0,"id":"c1"/);
+    assert.match(joined, /"finish_reason":"tool_calls"/);
+    assert.ok(joined.endsWith('data: [DONE]\n\n'));
+  });
+  it('toolCallBody has the OpenAI shape', () => {
+    assert.equal(toolCallBody([call('a', 'X', '{}')]).choices[0].message.content, null);
   });
 });

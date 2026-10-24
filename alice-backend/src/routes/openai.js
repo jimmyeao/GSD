@@ -37,6 +37,10 @@ import { requireApiKey } from '../auth.js';
 import { config } from '../config.js';
 import { generateImage } from '../agents/comfyClient.js';
 import { ensureComfyRunning, freeComfyMemory } from '../comfyManager.js';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { textToSpeech } from '../services/ttsService.js';
 import { ASSISTANT_MODEL, handleAssistantCompletion } from '../agents/voiceAssistant.js';
 
 const router = Router();
@@ -54,6 +58,7 @@ router.get('/models', (_req, res) => {
   const data = [
     ...CHAT_MODELS.map(id => ({ id, object: 'model', created: now, owned_by: 'alice' })),
     { id: ASSISTANT_MODEL, object: 'model', created: now, owned_by: 'alice' },
+    ...SPEECH_MODELS.map(id => ({ id, object: 'model', created: now, owned_by: 'alice' })),
     ...IMAGE_MODELS.map(id => ({ id: `alice-image-${id}`, object: 'model', created: now, owned_by: 'alice' })),
   ];
   res.json({ object: 'list', data });
@@ -121,6 +126,56 @@ router.post('/chat/completions', async (req, res) => {
   res.status(upstream.status);
   res.set('Content-Type', 'application/json');
   res.send(text);
+});
+
+// ── Speech (TTS) ────────────────────────────────────────────────────────
+// Lets Home Assistant (e.g. the HACS "OpenAI TTS" integration with a custom
+// endpoint) speak in Alice's configured voice (jarvis-clone / VoxCPM) instead
+// of its own Piper. Never log `input`: it is whatever was just said aloud.
+
+const SPEECH_MODELS = ['alice-tts'];
+const MAX_SPEECH_CHARS = 4000;
+
+// The user service's PATH lacks ~/.local/bin, where ffmpeg lives on this host.
+const LOCAL_FFMPEG = `${homedir()}/.local/bin/ffmpeg`;
+const FFMPEG = process.env.FFMPEG_PATH || (existsSync(LOCAL_FFMPEG) ? LOCAL_FFMPEG : 'ffmpeg');
+
+function wavToMp3(wav) {
+  return new Promise((resolve, reject) => {
+    const ff = spawn(FFMPEG, ['-v', 'error', '-i', 'pipe:0', '-f', 'mp3', '-b:a', '128k', 'pipe:1']);
+    const out = [];
+    ff.stdout.on('data', d => out.push(d));
+    ff.on('error', reject);
+    ff.on('close', code => (code === 0 ? resolve(Buffer.concat(out)) : reject(new Error(`ffmpeg exited ${code}`))));
+    ff.stdin.on('error', () => {});
+    ff.stdin.end(wav);
+  });
+}
+
+router.post('/audio/speech', async (req, res) => {
+  const { input, model = SPEECH_MODELS[0], response_format = 'wav', speed } = req.body || {};
+  if (typeof input !== 'string' || !input.trim()) {
+    return res.status(400).json({ error: { message: 'input (non-empty string) is required', type: 'invalid_request_error' } });
+  }
+  if (input.length > MAX_SPEECH_CHARS) {
+    return res.status(400).json({ error: { message: `input must be at most ${MAX_SPEECH_CHARS} characters`, type: 'invalid_request_error' } });
+  }
+  if (typeof model !== 'string' || (!SPEECH_MODELS.includes(model) && !/^(tts-1|tts-1-hd|gpt-4o-mini-tts)$/.test(model))) {
+    return res.status(400).json({ error: { message: `model must be one of: ${SPEECH_MODELS.join(', ')}`, type: 'invalid_request_error' } });
+  }
+  if (!['wav', 'mp3'].includes(response_format)) {
+    return res.status(400).json({ error: { message: 'response_format must be "wav" or "mp3"', type: 'invalid_request_error' } });
+  }
+  try {
+    const wav = await textToSpeech(input, { speed: Number.isFinite(speed) ? speed : undefined });
+    const audio = response_format === 'mp3' ? await wavToMp3(wav) : wav;
+    res.set('Content-Type', response_format === 'mp3' ? 'audio/mpeg' : 'audio/wav');
+    res.set('Cache-Control', 'no-store');
+    res.send(audio);
+  } catch (err) {
+    console.error('[v1/audio/speech] error:', err.message);
+    res.status(502).json({ error: { message: 'speech synthesis failed', type: 'api_error' } });
+  }
 });
 
 // ── Image generations ───────────────────────────────────────────────────

@@ -20,6 +20,7 @@ import { resolveVisuals } from './orchestrator.js';
 import { stmts, expireStaleApprovals } from './db.js';
 import { getMemoryContext, extractFactsAsync } from './memory.js';
 import { runWebAgent } from './agents/webAgent.js';
+import { runHomeAssistantAgent, findPendingCommand } from './agents/homeAssistantAgent.js';
 import { runMailAgent, executeApprovedAction, summariseExecution, isCompoundRequest } from './agents/mailAgent.js';
 import { socketAuth, csrfProtect, userFromRequest } from './auth.js';
 import { handleUpgrade as handlePreviewUpgrade } from './routes/preview.js';
@@ -226,6 +227,9 @@ io.on('connection', (socket) => {
       const conv = stmts.getConversation.get(conversationId, socket.user.id);
       if (conv?.agent_id === 'ExplainerAgent' || existsSync(join(EXPLAINERS_DIR, `conv-${Number(conversationId)}`))) agentId = 'ExplainerAgent';
     }
+    // A pending "Please confirm: …" belongs to the smart-home agent, or a bare
+    // "yes" would be routed to general chat.
+    if ((!agentId || agentId === 'RouterAgent') && findPendingCommand(history)) agentId = 'HomeAssistantAgent';
     if (!agentId || agentId === 'RouterAgent') {
       agentId = await routeWithLLM(
         content,
@@ -309,6 +313,12 @@ io.on('connection', (socket) => {
     // ── WebAgent → read-only internet tools (weather, news, search, read) ──
     if (agentId === 'WebAgent') {
       await runWebAgent({ socket, user: socket.user, content, history, convId });
+      return;
+    }
+
+    // ── HomeAssistantAgent → forwards smart-home commands to HA's Assist ──
+    if (agentId === 'HomeAssistantAgent') {
+      await runHomeAssistantAgent({ socket, user: socket.user, content, history, convId });
       return;
     }
 
