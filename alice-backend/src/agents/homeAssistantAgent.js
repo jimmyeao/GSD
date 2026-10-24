@@ -46,6 +46,17 @@ export function haConfig(env = process.env) {
   };
 }
 
+/**
+ * Optional restriction of the web agent to named users: HA_ALLOWED_USERS is a
+ * comma-separated list of emails/usernames. Unset = any signed-in Alice user
+ * (sign-in itself is already allowlisted).
+ */
+export function isHaUserAllowed(user, env = process.env) {
+  const list = (env.HA_ALLOWED_USERS || '').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+  if (!list.length) return true;
+  return [user?.email, user?.username].some(v => v && list.includes(String(v).toLowerCase()));
+}
+
 export const needsConfirmation = (text) => SENSITIVE.test(text);
 export const isConfirmation = (text) => YES.test(text);
 export const isCancellation = (text) => NO.test(text);
@@ -66,7 +77,7 @@ export function stripWholeHome(text) {
   return out || text;
 }
 
-const confirmPrompt = (command) => `${CONFIRM_PREFIX}${command}". Say yes to go ahead, or no to cancel.`;
+export const confirmPrompt = (command) => `${CONFIRM_PREFIX}${command}". Say yes to go ahead, or no to cancel.`;
 
 /** POST one utterance to Assist. Returns { text, type }. Never logs the text or token. */
 export async function askAssist(text, cfg, deps = {}) {
@@ -129,13 +140,15 @@ export async function handleHomeCommand({ content, history = [], signal }, deps 
 }
 
 /** Socket.IO agent: same event contract as runWebAgent (thinking → token(s) → done). */
-export async function runHomeAssistantAgent({ socket, content, history = [], convId }, deps = {}) {
+export async function runHomeAssistantAgent({ socket, user, content, history = [], convId }, deps = {}) {
   const abort = new AbortController();
   const onStop = () => abort.abort();
   socket.once('stop:stream', onStop);
   try {
     socket.emit('thinking', {});
-    const { text } = await handleHomeCommand({ content, history, signal: abort.signal }, deps);
+    const { text } = isHaUserAllowed(user, deps.env)
+      ? await handleHomeCommand({ content, history, signal: abort.signal }, deps)
+      : { text: "Your account isn't allowed to control the home." };
     for (let i = 0; i < text.length; i += 8) socket.emit('token', { token: text.slice(i, i + 8) });
     if (text && convId) {
       try {

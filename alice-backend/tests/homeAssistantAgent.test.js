@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import {
   stripWholeHome,
+  isHaUserAllowed,
   haConfig, askAssist, handleHomeCommand, runHomeAssistantAgent, findPendingCommand,
   needsConfirmation, isConfirmation, isCancellation, NOT_CONFIGURED_REPLY, HomeAssistantError,
 } from '../src/agents/homeAssistantAgent.js';
@@ -155,5 +156,18 @@ describe('stripWholeHome', () => {
     assert.equal(stripWholeHome('what lights are on in the kitchen'), 'what lights are on in the kitchen');
     assert.equal(stripWholeHome('turn off the kitchen light'), 'turn off the kitchen light');
     assert.equal(stripWholeHome('in the house'), 'in the house');
+  });
+});
+
+describe('isHaUserAllowed', () => {
+  it('allows everyone when HA_ALLOWED_USERS is unset', () => {
+    assert.equal(isHaUserAllowed({ email: 'a@b.c' }, {}), true);
+  });
+  it('restricts to listed emails or usernames, case-insensitively', () => {
+    const env = { HA_ALLOWED_USERS: 'Jimmy@Example.com, bob' };
+    assert.equal(isHaUserAllowed({ email: 'jimmy@example.com' }, env), true);
+    assert.equal(isHaUserAllowed({ username: 'BOB' }, env), true);
+    assert.equal(isHaUserAllowed({ email: 'eve@example.com', username: 'eve' }, env), false);
+    assert.equal(isHaUserAllowed(undefined, env), false);
   });
 });
